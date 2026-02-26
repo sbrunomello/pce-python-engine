@@ -5,12 +5,15 @@ const metricsEl = document.getElementById("metrics");
 const metricsRawEl = document.getElementById("metricsRaw");
 const statusBadge = document.getElementById("statusBadge");
 const autoScrollEl = document.getElementById("autoScroll");
+const runChronometerEl = document.getElementById("runChronometer");
 
 let world = null;
 let obstacles = [];
 let lastAction = { type: "robot.stop" };
 let latestTick = -1;
 let runtimeElapsedSeconds = 0;
+let chronometerRunning = false;
+let chronometerLastUpdateMs = null;
 
 const MAX_LOG_LINES = 500;
 const apiBase = `${window.location.pathname.replace(/\/$/, "")}`;
@@ -97,6 +100,33 @@ function metricRow(label, value) {
   return `<dt>${label}</dt><dd>${value}</dd>`;
 }
 
+function formatElapsed(seconds) {
+  const safeSeconds = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(safeSeconds / 60);
+  const sec = safeSeconds - minutes * 60;
+  return `${String(minutes).padStart(2, "0")}:${sec.toFixed(1).padStart(4, "0")}`;
+}
+
+function renderChronometer() {
+  if (!runChronometerEl) return;
+  runChronometerEl.textContent = formatElapsed(runtimeElapsedSeconds);
+}
+
+function tickChronometer() {
+  if (!chronometerRunning) {
+    chronometerLastUpdateMs = null;
+    return;
+  }
+  const nowMs = performance.now();
+  if (chronometerLastUpdateMs !== null) {
+    runtimeElapsedSeconds += (nowMs - chronometerLastUpdateMs) / 1000;
+  }
+  chronometerLastUpdateMs = nowMs;
+  renderChronometer();
+}
+
+setInterval(tickChronometer, 100);
+
 function updateMetrics(data) {
   const metrics = data.metrics || {};
   const running = Boolean(metrics.running);
@@ -107,6 +137,11 @@ function updateMetrics(data) {
   statusBadge.className = `badge ${done ? "done" : (running ? "running" : "stopped")}`;
 
   runtimeElapsedSeconds = Number(metrics.elapsed_seconds || data?.runtime?.elapsed_seconds || runtimeElapsedSeconds || 0);
+  chronometerRunning = running && !done;
+  if (!chronometerRunning) {
+    chronometerLastUpdateMs = null;
+  }
+  renderChronometer();
 
   metricsEl.innerHTML = [
     metricRow("Tick", data.tick ?? "-"),
@@ -157,6 +192,7 @@ ws.onmessage = (event) => {
     world = { ...data.world };
     latestTick = Math.max(latestTick, data.tick || 0);
     (data.logs || []).forEach(appendLog);
+    updateMetrics(data);
     draw();
     return;
   }

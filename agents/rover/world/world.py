@@ -35,8 +35,9 @@ class WorldMetrics:
 class GridWorld:
     def __init__(
         self,
-        width: int = 80,
-        height: int = 60,
+        # Smaller defaults improve the initial learning loop and UI readability.
+        width: int = 20,
+        height: int = 20,
         seed: int = 42,
         max_steps: int = 2000,
         collision_limit: int = 20,

@@ -78,6 +78,9 @@ class RoverRuntime:
         await self.stop()
         self.world.reset()
         self.reward_window.clear()
+        # A reset starts a brand-new runtime session timer.
+        self.total_run_seconds = 0.0
+        self.run_started_at = None
         await self.broadcast(self._init_payload())
 
     async def reset_stats(self) -> None:
@@ -154,9 +157,6 @@ class RoverRuntime:
                     self.attempts_total += 1
                     if reason == "goal":
                         self.episode_successes += 1
-                        if self.run_started_at is not None:
-                            self.total_run_seconds += time.monotonic() - self.run_started_at
-                            self.run_started_at = None
                     elif reason == "battery_depleted":
                         self.failures_battery += 1
                     elif reason == "timeout":
