@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pce.local/schemas/action.schema.json",
+  "title": "PCE ActionPlan",
+  "type": "object",
+  "required": ["action_type", "rationale", "priority"],
+  "properties": {
+    "action_type": { "type": "string", "minLength": 1 },
+    "rationale": { "type": "string", "minLength": 1 },
+    "priority": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false
+}
