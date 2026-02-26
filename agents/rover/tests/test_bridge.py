@@ -25,5 +25,5 @@ def test_decide_falls_back_when_pce_is_slow() -> None:
 
     import asyncio
 
-    action = asyncio.run(bridge.decide(observation, trace_id="t-1"))
-    assert action == {"type": "robot.turn_left"}
+    decision = asyncio.run(bridge.decide(observation, trace_id="t-1"))
+    assert decision["action"] == {"type": "robot.turn_left"}

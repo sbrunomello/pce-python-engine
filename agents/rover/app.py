@@ -84,13 +84,17 @@ class RoverRuntime:
                     },
                 )
                 trace_id = f"ep:{snapshot['episode_id']}/t:{snapshot['tick']}"
-                action = await self.bridge.decide(observation, trace_id)
+                decision = await self.bridge.decide(observation, trace_id)
+                action = decision.get("action", {"type": "robot.stop"})
+                if not isinstance(action, dict):
+                    action = {"type": "robot.stop"}
                 self.world.apply_action(action)
                 state = self.world.snapshot()
 
                 if state["tick"] % self.feedback_every == 0 or bool(state["metrics"]["done"]):
                     feedback = build_feedback_payload(state)
-                    await self.bridge.send_feedback(feedback)
+                    feedback_result = await self.bridge.send_feedback(feedback)
+                    decision["feedback"] = feedback_result
 
                 self.reward_window.append(float(state["metrics"]["reward"]))
                 if len(self.reward_window) > self.window_size:
@@ -111,7 +115,7 @@ class RoverRuntime:
                     await self.broadcast(log_item)
 
                 if state["tick"] % render_every == 0 or bool(state["metrics"]["done"]):
-                    await self.broadcast(self._frame_payload(action))
+                    await self.broadcast(self._frame_payload(action, decision))
 
                 if bool(state["metrics"]["done"]):
                     self.running = False
@@ -153,9 +157,13 @@ class RoverRuntime:
             "logs": self.log_buffer.items(),
         }
 
-    def _frame_payload(self, action: dict[str, Any]) -> dict[str, Any]:
+    def _frame_payload(self, action: dict[str, Any], decision: dict[str, Any] | None = None) -> dict[str, Any]:
         state = self.world.snapshot()
         avg = sum(self.reward_window) / len(self.reward_window) if self.reward_window else 0.0
+        decision_data = decision or {}
+        metadata = decision_data.get("metadata", {}) if isinstance(decision_data, dict) else {}
+        rl_meta = metadata.get("rl", {}) if isinstance(metadata, dict) else {}
+
         return {
             "type": "frame",
             "tick": state["tick"],
@@ -165,6 +173,10 @@ class RoverRuntime:
                 **state["metrics"],
                 "avg_reward_window": avg,
                 "running": self.running,
+                "epsilon": rl_meta.get("epsilon"),
+                "policy_mode": rl_meta.get("policy_mode"),
+                "best_action": rl_meta.get("best_action"),
+                "q_values": rl_meta.get("q", {}),
             },
             "last_action": action,
         }
