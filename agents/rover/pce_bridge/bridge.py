@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from typing import Any
 
@@ -35,13 +34,19 @@ class PCEBridge:
             response = await self._client.post(self.events_url, json=payload)
             response.raise_for_status()
             result = response.json()
-            return self._adapt_action(result.get("action"), observation_payload)
+            action = result.get("action")
+            if isinstance(action, dict) and isinstance(action.get("type"), str):
+                return {
+                    "action": action,
+                    "metadata": result.get("metadata", {}),
+                    "trace_id": trace_id,
+                }
+            return {"action": self._fallback_action(observation_payload), "metadata": {}, "trace_id": trace_id}
         except (httpx.HTTPError, ValueError):
             # Keep the simulation fluid even when the decision endpoint is slow/unavailable.
-            # We intentionally degrade to a deterministic local policy instead of blocking ticks.
-            return self._fallback_action(observation_payload)
+            return {"action": self._fallback_action(observation_payload), "metadata": {}, "trace_id": trace_id}
 
-    async def send_feedback(self, feedback_payload: dict[str, Any]) -> None:
+    async def send_feedback(self, feedback_payload: dict[str, Any]) -> dict[str, Any]:
         payload = {
             "event_type": FEEDBACK_EVENT_TYPE,
             "source": "agents.rover",
@@ -53,6 +58,8 @@ class PCEBridge:
         }
         response = await self._client.post(self.events_url, json=payload)
         response.raise_for_status()
+        body = response.json()
+        return body if isinstance(body, dict) else {}
 
     def _fallback_action(self, observation_payload: dict[str, Any]) -> dict[str, Any]:
         sensors = observation_payload["sensors"]
@@ -61,17 +68,3 @@ class PCEBridge:
         if int(sensors["front_left"]) > int(sensors["front_right"]):
             return {"type": "robot.turn_left"}
         return {"type": "robot.turn_right"}
-
-    def _adapt_action(
-        self, pce_action: object, observation_payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        delta = observation_payload["delta"]
-        sensors = observation_payload["sensors"]
-        if int(sensors["front"]) > 0 and abs(int(delta["dx"])) + abs(int(delta["dy"])) > 0:
-            return {"type": "robot.move_forward", "amount": 1}
-
-        if isinstance(pce_action, str) and pce_action:
-            choice = int(hashlib.sha256(pce_action.encode("utf-8")).hexdigest(), 16) % 2
-            return {"type": "robot.turn_left" if choice == 0 else "robot.turn_right"}
-
-        return {"type": "robot.stop"}
