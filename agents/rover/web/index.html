@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rover Simulator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <section>
+        <canvas id="sim" width="800" height="600"></canvas>
+      </section>
+      <aside>
+        <h1>Rover</h1>
+        <div class="controls">
+          <button id="start">Start</button>
+          <button id="stop">Stop</button>
+          <button id="reset">Reset</button>
+        </div>
+        <pre id="metrics"></pre>
+        <h3>Logs</h3>
+        <div id="logs"></div>
+      </aside>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

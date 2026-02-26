@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from agents.rover import router as rover_router
 from pce.afs.feedback import AdaptiveFeedbackSystem
 from pce.ao.orchestrator import ActionOrchestrator
 from pce.core.cci import CCIMetric
@@ -52,7 +53,9 @@ def process_event(event_in: EventIn) -> dict[str, object]:
     sm.remember_event(event)
 
     strategic_values = updated_state.get("strategic_values")
-    value_score = vel.evaluate_event(event, strategic_values if isinstance(strategic_values, dict) else None)
+    value_score = vel.evaluate_event(
+        event, strategic_values if isinstance(strategic_values, dict) else None
+    )
     cci, components = cci_metric.from_state_manager(sm)
     plan = de.deliberate(updated_state, value_score, cci)
     result = ao.execute(plan)
@@ -122,3 +125,6 @@ def get_state() -> dict[str, object]:
 def get_cci_history() -> dict[str, object]:
     """Expose historical CCI snapshots."""
     return {"history": sm.get_cci_history()}
+
+
+app.include_router(rover_router)
