@@ -1,0 +1,11 @@
+{
+  "event_type": "robot.sensor",
+  "source": "robot-core",
+  "payload": {
+    "domain": "robotics",
+    "obstacle_distance_m": 1.8,
+    "battery_level": 0.64,
+    "goal": "reach_waypoint_A",
+    "tags": ["safe", "strategic"]
+  }
+}

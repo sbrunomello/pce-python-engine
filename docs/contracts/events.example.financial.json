@@ -1,0 +1,11 @@
+{
+  "event_type": "cashflow.update",
+  "source": "finance-agent",
+  "payload": {
+    "domain": "finance",
+    "cash_in": 1200.0,
+    "cash_out": 830.0,
+    "budget_remaining": 370.0,
+    "tags": ["budget-aware", "strategic", "efficient", "safe"]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pce.local/schemas/events.schema.json",
+  "title": "PCE Event",
+  "type": "object",
+  "required": ["event_type", "source", "payload"],
+  "properties": {
+    "event_type": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "minLength": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["domain", "tags"],
+      "properties": {
+        "domain": { "type": "string", "minLength": 1 },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
