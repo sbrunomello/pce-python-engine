@@ -27,8 +27,9 @@ UI:
 
 ## Configuração rápida
 
-- Tamanho do mundo e seed estão em `GridWorld(...)` no runtime de `app.py`.
-- Para variar seed/tamanho, ajuste os parâmetros da instância em `RoverRuntime`.
+- Tamanho do mundo, seed, alcance e ruído de sensores estão em `GridWorld(...)` no runtime de `app.py`.
+- Performance do runtime: `tick_rate_hz` (simulação), `frame_rate_hz` (render), `feedback_every` e `log_every` em `RoverRuntime`.
+- URL do PCE pode ser sobrescrita via `PCE_EVENTS_URL` (default: `http://127.0.0.1:8000/events`).
 
 ## Testes
 
