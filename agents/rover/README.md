@@ -1,6 +1,6 @@
 # Rover Agent (simulador web 2D)
 
-Este agente mantém o **mundo/simulador dentro de `agents/rover`**; o core PCE apenas recebe observações e retorna decisões (adaptadas para ações robóticas).
+Este agente mantém o **mundo/simulador dentro de `agents/rover`**; o core PCE recebe observações e retorna **ações robóticas explícitas**.
 
 ## Como rodar
 
@@ -16,7 +16,33 @@ UI:
 - `POST /agents/rover/control/start`
 - `POST /agents/rover/control/stop`
 - `POST /agents/rover/control/reset`
+- `POST /agents/rover/control/clear_policy` (zera Q-table + hiperparâmetros)
 - `WS /agents/rover/ws`
+
+## Aprendizado RL (Q-learning tabular)
+
+- **Estado discreto**: `d{dir}_dx{sign(dx)}_dy{sign(dy)}_f{bucket(front)}_l{bucket(left)}_r{bucket(right)}`.
+- **Ações**: `FWD`, `L`, `R`, `S` mapeadas para `robot.move_forward`, `robot.turn_left`, `robot.turn_right`, `robot.stop`.
+- **Política**: epsilon-greedy com persistência no SQLite (`robotics_q_values`, `robotics_params`).
+- **Atualização real**: `Q(s,a) ← Q(s,a) + α * (r + γ * max_a' Q(s',a') - Q(s,a))` no evento de feedback.
+
+### Hiperparâmetros padrão
+
+- `alpha=0.2`
+- `gamma=0.95`
+- `epsilon=1.0`
+- `epsilon_decay=0.9995`
+- `epsilon_min=0.05`
+
+## Observabilidade
+
+A UI exibe:
+- epsilon atual;
+- modo da política (`explore`/`exploit`);
+- melhor ação do estado;
+- reward médio em janela.
+
+Além disso, o backend gera log estruturado `q_update` a cada atualização RL.
 
 ## Arquitetura
 
@@ -34,5 +60,5 @@ UI:
 ## Testes
 
 ```bash
-pytest -q agents/rover/tests
+pytest -q agents/rover/tests tests/test_robotics_rl.py
 ```

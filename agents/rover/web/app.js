@@ -100,6 +100,9 @@ function updateMetrics(data) {
     metricRow("Distance", metrics.distance ?? "-"),
     metricRow("Collisions", metrics.collisions ?? "-"),
     metricRow("Last Action", lastAction.type || "robot.stop"),
+    metricRow("Epsilon", metrics.epsilon !== null && metrics.epsilon !== undefined ? Number(metrics.epsilon).toFixed(4) : "-"),
+    metricRow("Policy Mode", metrics.policy_mode || "-"),
+    metricRow("Best Action", metrics.best_action || "-"),
     metricRow("Done", done ? "yes" : "no"),
     metricRow("Reason", metrics.reason || "-"),
   ].join("");
