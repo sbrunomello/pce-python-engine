@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+
+from .logging.logger import StructuredLogger
+from .logging.ring_buffer import RingBuffer
+from .pce_bridge.bridge import PCEBridge
+from .pce_bridge.contracts import build_feedback_payload, build_observation_payload
+from .world.world import GridWorld
+
+ROBOT_NAME = "rover"
+BASE_PATH = f"/agents/{ROBOT_NAME}"
+WEB_DIR = Path(__file__).parent / "web"
+
+router = APIRouter()
+
+
+class RoverRuntime:
+    def __init__(self) -> None:
+        self.world = GridWorld()
+        self.log_buffer = RingBuffer(max_size=500)
+        self.logger = StructuredLogger(self.log_buffer)
+        self.bridge = PCEBridge()
+        self.clients: set[WebSocket] = set()
+        self.task: asyncio.Task[None] | None = None
+        self.running = False
+        self.tick_rate_hz = 15
+        self.reward_window: list[float] = []
+        self.window_size = 100
+
+    async def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self.task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self.running = False
+        if self.task and not self.task.done():
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    async def reset(self) -> None:
+        await self.stop()
+        self.world.reset()
+        self.reward_window.clear()
+        await self.broadcast(self._init_payload())
+
+    async def _loop(self) -> None:
+        try:
+            while self.running:
+                snapshot = self.world.snapshot()
+                sensors = self.world.sensors()
+                observation = build_observation_payload(
+                    snapshot,
+                    {
+                        "front": sensors.front,
+                        "front_left": sensors.front_left,
+                        "front_right": sensors.front_right,
+                        "left": sensors.left,
+                        "right": sensors.right,
+                    },
+                )
+                trace_id = f"ep:{snapshot['episode_id']}/t:{snapshot['tick']}"
+                action = await self.bridge.decide(observation, trace_id)
+                self.world.apply_action(action)
+                state = self.world.snapshot()
+                feedback = build_feedback_payload(state)
+                await self.bridge.send_feedback(feedback)
+
+                self.reward_window.append(float(state["metrics"]["reward"]))
+                if len(self.reward_window) > self.window_size:
+                    self.reward_window.pop(0)
+
+                log_item = self.logger.log(
+                    level="info",
+                    component="rover.loop",
+                    message="tick_processed",
+                    trace_id=trace_id,
+                    data={
+                        "sensors": observation["sensors"],
+                        "action": action,
+                        "reward": state["metrics"]["reward"],
+                    },
+                )
+                await self.broadcast(self._frame_payload(action))
+                await self.broadcast(log_item)
+
+                if bool(state["metrics"]["done"]):
+                    self.running = False
+                await asyncio.sleep(1.0 / self.tick_rate_hz)
+        except Exception as exc:
+            self.logger.log(
+                level="error",
+                component="rover.loop",
+                message="loop_failed",
+                trace_id="runtime",
+                data={"error": str(exc)},
+            )
+            self.running = False
+
+    def _init_payload(self) -> dict[str, Any]:
+        return {
+            "type": "init",
+            "tick": self.world.metrics.tick,
+            "episode_id": self.world.episode_id,
+            "world": {
+                "w": self.world.width,
+                "h": self.world.height,
+                "obstacles": [{"x": x, "y": y} for x, y in sorted(self.world.obstacles)],
+                "robot": {
+                    "x": self.world.robot.x,
+                    "y": self.world.robot.y,
+                    "dir": self.world.robot.direction,
+                    "energy": self.world.robot.energy,
+                },
+                "goal": {"x": self.world.goal.x, "y": self.world.goal.y},
+            },
+            "logs": self.log_buffer.items(),
+        }
+
+    def _frame_payload(self, action: dict[str, Any]) -> dict[str, Any]:
+        state = self.world.snapshot()
+        avg = sum(self.reward_window) / len(self.reward_window) if self.reward_window else 0.0
+        return {
+            "type": "frame",
+            "tick": state["tick"],
+            "episode_id": state["episode_id"],
+            "world": state["world"],
+            "metrics": {
+                **state["metrics"],
+                "avg_reward_window": avg,
+                "running": self.running,
+            },
+            "last_action": action,
+        }
+
+    async def broadcast(self, payload: dict[str, Any]) -> None:
+        stale: list[WebSocket] = []
+        for client in self.clients:
+            try:
+                await client.send_json(payload)
+            except RuntimeError:
+                stale.append(client)
+        for client in stale:
+            self.clients.discard(client)
+
+
+runtime = RoverRuntime()
+
+
+@router.get(BASE_PATH + "/")
+async def rover_ui() -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@router.get(BASE_PATH + "/app.js")
+async def rover_js() -> FileResponse:
+    return FileResponse(WEB_DIR / "app.js")
+
+
+@router.get(BASE_PATH + "/styles.css")
+async def rover_css() -> FileResponse:
+    return FileResponse(WEB_DIR / "styles.css")
+
+
+@router.post(BASE_PATH + "/control/start")
+async def start() -> dict[str, object]:
+    await runtime.start()
+    await runtime.broadcast(runtime._init_payload())
+    return {"status": "running", "tick": runtime.world.metrics.tick}
+
+
+@router.post(BASE_PATH + "/control/stop")
+async def stop() -> dict[str, object]:
+    await runtime.stop()
+    return {"status": "stopped", "tick": runtime.world.metrics.tick}
+
+
+@router.post(BASE_PATH + "/control/reset")
+async def reset() -> dict[str, object]:
+    await runtime.reset()
+    return {"status": "reset", "episode_id": runtime.world.episode_id}
+
+
+@router.get(BASE_PATH + "/state")
+async def state() -> dict[str, object]:
+    return runtime._frame_payload({"type": "robot.stop"})
+
+
+@router.websocket(BASE_PATH + "/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    await websocket.accept()
+    runtime.clients.add(websocket)
+    await websocket.send_json(runtime._init_payload())
+    await websocket.send_json(runtime._frame_payload({"type": "robot.stop"}))
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        runtime.clients.discard(websocket)
