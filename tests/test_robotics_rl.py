@@ -67,10 +67,25 @@ def test_robotics_observation_then_feedback_updates_q_table() -> None:
             "reason": "running",
             "distance": 2,
             "collisions": 0,
+            "next_observation": {
+                "tick": 2,
+                "episode_id": "ep-test",
+                "robot": {"x": 2, "y": 1, "dir": 2, "energy": 99.0},
+                "goal": {"x": 4, "y": 1},
+                "sensors": {
+                    "front": 1,
+                    "front_left": 2,
+                    "front_right": 2,
+                    "left": 1,
+                    "right": 3,
+                },
+                "delta": {"dx": 2, "dy": 0, "manhattan": 2},
+            },
         },
     }
     feedback_response = client.post("/events", json=feedback_payload)
     assert feedback_response.status_code == 200
     feedback_body = feedback_response.json()
     assert feedback_body["updated"] is True
+    assert feedback_body["q_update"]["next_state_key"] != feedback_body["q_update"]["state_key"]
     assert float(feedback_body["q_update"]["new_q"]) > float(feedback_body["q_update"]["old_q"])

@@ -90,9 +90,21 @@ class RoverRuntime:
                     action = {"type": "robot.stop"}
                 self.world.apply_action(action)
                 state = self.world.snapshot()
+                next_sensors = self.world.sensors()
+                next_observation = build_observation_payload(
+                    state,
+                    {
+                        "front": next_sensors.front,
+                        "front_left": next_sensors.front_left,
+                        "front_right": next_sensors.front_right,
+                        "left": next_sensors.left,
+                        "right": next_sensors.right,
+                    },
+                )
 
                 if state["tick"] % self.feedback_every == 0 or bool(state["metrics"]["done"]):
                     feedback = build_feedback_payload(state)
+                    feedback["next_observation"] = next_observation
                     feedback_result = await self.bridge.send_feedback(feedback)
                     decision["feedback"] = feedback_result
 
