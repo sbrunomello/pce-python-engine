@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,14 +37,26 @@ class RoverRuntime:
         self.feedback_every = 2
         self.reward_window: list[float] = []
         self.window_size = 100
+        self.attempts_total = 0
+        self.episode_successes = 0
+        self.failures_battery = 0
+        self.failures_timeout = 0
+        self.failures_collision = 0
+        self.run_started_at: float | None = None
+        self.total_run_seconds = 0.0
 
     async def start(self) -> None:
         if self.running:
             return
         self.running = True
+        if self.run_started_at is None:
+            self.run_started_at = time.monotonic()
         self.task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
+        if self.run_started_at is not None:
+            self.total_run_seconds += time.monotonic() - self.run_started_at
+            self.run_started_at = None
         self.running = False
         if not self.task:
             return
@@ -66,6 +79,13 @@ class RoverRuntime:
         self.world.reset()
         self.reward_window.clear()
         await self.broadcast(self._init_payload())
+
+    async def reset_stats(self) -> None:
+        self.attempts_total = 0
+        self.episode_successes = 0
+        self.failures_battery = 0
+        self.failures_timeout = 0
+        self.failures_collision = 0
 
     async def _loop(self) -> None:
         try:
@@ -130,7 +150,25 @@ class RoverRuntime:
                     await self.broadcast(self._frame_payload(action, decision))
 
                 if bool(state["metrics"]["done"]):
-                    self.running = False
+                    reason = str(state["metrics"].get("reason", ""))
+                    self.attempts_total += 1
+                    if reason == "goal":
+                        self.episode_successes += 1
+                        if self.run_started_at is not None:
+                            self.total_run_seconds += time.monotonic() - self.run_started_at
+                            self.run_started_at = None
+                    elif reason == "battery_depleted":
+                        self.failures_battery += 1
+                    elif reason == "timeout":
+                        self.failures_timeout += 1
+                    elif reason == "collision":
+                        self.failures_collision += 1
+
+                    if self.running:
+                        self.world.reset()
+                        self.reward_window.clear()
+                        await self.broadcast(self._init_payload())
+                        continue
                     break
 
                 await asyncio.sleep(1.0 / self.tick_rate_hz)
@@ -150,6 +188,9 @@ class RoverRuntime:
                 self.task = None
 
     def _init_payload(self) -> dict[str, Any]:
+        run_seconds = self.total_run_seconds
+        if self.run_started_at is not None:
+            run_seconds += time.monotonic() - self.run_started_at
         return {
             "type": "init",
             "tick": self.world.metrics.tick,
@@ -165,6 +206,10 @@ class RoverRuntime:
                     "energy": self.world.robot.energy,
                 },
                 "goal": {"x": self.world.goal.x, "y": self.world.goal.y},
+                "start": {"x": self.world.start[0], "y": self.world.start[1]},
+            },
+            "runtime": {
+                "elapsed_seconds": run_seconds,
             },
             "logs": self.log_buffer.items(),
         }
@@ -175,6 +220,10 @@ class RoverRuntime:
         decision_data = decision or {}
         metadata = decision_data.get("metadata", {}) if isinstance(decision_data, dict) else {}
         rl_meta = metadata.get("rl", {}) if isinstance(metadata, dict) else {}
+        run_seconds = self.total_run_seconds
+        if self.run_started_at is not None:
+            run_seconds += time.monotonic() - self.run_started_at
+        success_rate = self.episode_successes / max(1, self.attempts_total)
 
         return {
             "type": "frame",
@@ -189,6 +238,13 @@ class RoverRuntime:
                 "policy_mode": rl_meta.get("policy_mode"),
                 "best_action": rl_meta.get("best_action"),
                 "q_values": rl_meta.get("q", {}),
+                "attempts_total": self.attempts_total,
+                "successes": self.episode_successes,
+                "failures_battery": self.failures_battery,
+                "failures_timeout": self.failures_timeout,
+                "failures_collision": self.failures_collision,
+                "success_rate": success_rate,
+                "elapsed_seconds": run_seconds,
             },
             "last_action": action,
         }

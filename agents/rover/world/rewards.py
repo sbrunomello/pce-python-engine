@@ -9,12 +9,15 @@ class RewardInput:
     current_distance: int
     collision: bool
     reached_goal: bool
+    battery_depleted: bool
 
 
 def compute_step_reward(data: RewardInput) -> float:
     reward = -0.1
     if data.reached_goal:
         return reward + 100.0
+    if data.battery_depleted:
+        reward -= 50.0
     if data.collision:
         reward -= 5.0
     if data.current_distance < data.prev_distance:
