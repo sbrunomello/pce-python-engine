@@ -13,7 +13,7 @@ class PCEBridge:
     def __init__(
         self,
         events_url: str | None = None,
-        timeout_seconds: float = 3.0,
+        timeout_seconds: float = 0.25,
     ) -> None:
         self.events_url = events_url or os.getenv("PCE_EVENTS_URL", "http://127.0.0.1:8000/events")
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
@@ -31,10 +31,15 @@ class PCEBridge:
                 **observation_payload,
             },
         }
-        response = await self._client.post(self.events_url, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        return self._adapt_action(result.get("action"), observation_payload)
+        try:
+            response = await self._client.post(self.events_url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            return self._adapt_action(result.get("action"), observation_payload)
+        except (httpx.HTTPError, ValueError):
+            # Keep the simulation fluid even when the decision endpoint is slow/unavailable.
+            # We intentionally degrade to a deterministic local policy instead of blocking ticks.
+            return self._fallback_action(observation_payload)
 
     async def send_feedback(self, feedback_payload: dict[str, Any]) -> None:
         payload = {
@@ -48,6 +53,14 @@ class PCEBridge:
         }
         response = await self._client.post(self.events_url, json=payload)
         response.raise_for_status()
+
+    def _fallback_action(self, observation_payload: dict[str, Any]) -> dict[str, Any]:
+        sensors = observation_payload["sensors"]
+        if int(sensors["front"]) > 0:
+            return {"type": "robot.move_forward", "amount": 1}
+        if int(sensors["front_left"]) > int(sensors["front_right"]):
+            return {"type": "robot.turn_left"}
+        return {"type": "robot.turn_right"}
 
     def _adapt_action(
         self, pce_action: object, observation_payload: dict[str, Any]
