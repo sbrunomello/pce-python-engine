@@ -35,6 +35,8 @@ def build_observation_payload(
 
 def build_feedback_payload(world_state: dict[str, object]) -> dict[str, object]:
     metrics = world_state["metrics"]
+    world = world_state["world"]
+    robot = world["robot"]
     return {
         "tick": int(world_state["tick"]),
         "episode_id": str(world_state["episode_id"]),
@@ -43,4 +45,5 @@ def build_feedback_payload(world_state: dict[str, object]) -> dict[str, object]:
         "reason": metrics["reason"],
         "distance": int(metrics["distance"]),
         "collisions": int(metrics["collisions"]),
+        "battery": float(robot["energy"]),
     }

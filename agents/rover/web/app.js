@@ -10,6 +10,7 @@ let world = null;
 let obstacles = [];
 let lastAction = { type: "robot.stop" };
 let latestTick = -1;
+let runtimeElapsedSeconds = 0;
 
 const MAX_LOG_LINES = 500;
 const apiBase = `${window.location.pathname.replace(/\/$/, "")}`;
@@ -70,6 +71,19 @@ function draw() {
   ctx.strokeRect(world.goal.x * tileW + 1, world.goal.y * tileH + 1, Math.max(1, tileW - 2), Math.max(1, tileH - 2));
 
   const triangle = directionTriangle(world.robot, tileW, tileH);
+
+  if (world.start) {
+    ctx.fillStyle = "#f97316";
+    ctx.fillRect(world.start.x * tileW, world.start.y * tileH, tileW, tileH);
+    ctx.strokeStyle = "#fdba74";
+    ctx.strokeRect(
+      world.start.x * tileW + 1,
+      world.start.y * tileH + 1,
+      Math.max(1, tileW - 2),
+      Math.max(1, tileH - 2),
+    );
+  }
+
   ctx.fillStyle = "#ef4444";
   ctx.beginPath();
   ctx.moveTo(triangle[0][0], triangle[0][1]);
@@ -92,6 +106,8 @@ function updateMetrics(data) {
   statusBadge.textContent = status;
   statusBadge.className = `badge ${done ? "done" : (running ? "running" : "stopped")}`;
 
+  runtimeElapsedSeconds = Number(metrics.elapsed_seconds || data?.runtime?.elapsed_seconds || runtimeElapsedSeconds || 0);
+
   metricsEl.innerHTML = [
     metricRow("Tick", data.tick ?? "-"),
     metricRow("Episode", data.episode_id ?? "-"),
@@ -99,6 +115,14 @@ function updateMetrics(data) {
     metricRow("Avg Reward (window)", Number(metrics.avg_reward_window || 0).toFixed(2)),
     metricRow("Distance", metrics.distance ?? "-"),
     metricRow("Collisions", metrics.collisions ?? "-"),
+    metricRow("Battery", Number(data?.world?.robot?.energy || 0).toFixed(1)),
+    metricRow("Attempts Total", metrics.attempts_total ?? 0),
+    metricRow("Successes", metrics.successes ?? 0),
+    metricRow("Fail Battery", metrics.failures_battery ?? 0),
+    metricRow("Fail Timeout", metrics.failures_timeout ?? 0),
+    metricRow("Fail Collision", metrics.failures_collision ?? 0),
+    metricRow("Success Rate", `${(Number(metrics.success_rate || 0) * 100).toFixed(1)}%`),
+    metricRow("Run Timer (s)", runtimeElapsedSeconds.toFixed(1)),
     metricRow("Last Action", lastAction.type || "robot.stop"),
     metricRow("Epsilon", metrics.epsilon !== null && metrics.epsilon !== undefined ? Number(metrics.epsilon).toFixed(4) : "-"),
     metricRow("Policy Mode", metrics.policy_mode || "-"),
@@ -162,6 +186,7 @@ async function post(path) {
 document.getElementById("start").onclick = () => post("start");
 document.getElementById("stop").onclick = () => post("stop");
 document.getElementById("reset").onclick = () => post("reset");
+document.getElementById("resetStats").onclick = () => post("reset_stats");
 document.getElementById("clearLogs").onclick = () => { logsEl.innerHTML = ""; };
 document.getElementById("toggleRaw").onclick = () => {
   metricsRawEl.classList.toggle("hidden");

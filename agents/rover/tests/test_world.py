@@ -33,3 +33,18 @@ def test_done_goal_and_timeout() -> None:
     timeout_world.apply_action({"type": "robot.stop"})
     assert timeout_world.metrics.done is True
     assert timeout_world.metrics.reason == "timeout"
+
+
+def test_done_when_battery_depletes_before_goal() -> None:
+    world = GridWorld(width=5, height=5, seed=1, battery_max=1.0, cost_move=1.0)
+    world.goal.x = 4
+    world.goal.y = 4
+    world.robot.x = 0
+    world.robot.y = 0
+    world.robot.direction = 1
+
+    world.apply_action({"type": "robot.move_forward", "amount": 1})
+
+    assert world.robot.energy == 0.0
+    assert world.metrics.done is True
+    assert world.metrics.reason == "battery_depleted"

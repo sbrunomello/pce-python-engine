@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from agents.rover import router as rover_router
+from agents.rover.app import runtime as rover_runtime
 from pce.afs.feedback import AdaptiveFeedbackSystem
 from pce.ao.orchestrator import ActionOrchestrator
 from pce.core.cci import CCIMetric
@@ -172,6 +173,14 @@ def clear_rover_policy() -> dict[str, object]:
         state["robotics"] = {}
         sm.save_state(state)
     return {"status": "cleared", "defaults": sm.get_robotics_params()}
+
+
+@app.post("/agents/rover/control/reset_stats")
+async def reset_rover_stats() -> dict[str, object]:
+    """Reset rover runtime local counters without touching RL policy."""
+    await rover_runtime.reset_stats()
+    await rover_runtime.broadcast(rover_runtime._frame_payload({"type": "robot.stop"}))
+    return {"status": "stats_reset"}
 
 
 app.include_router(rover_router)

@@ -42,6 +42,10 @@ class GridWorld:
         collision_limit: int = 20,
         sensor_range: int = 3,
         sensor_noise_p: float = 0.10,
+        battery_max: float = 200.0,
+        cost_move: float = 1.0,
+        cost_turn: float = 0.5,
+        cost_stop: float = 0.2,
     ) -> None:
         self.width = width
         self.height = height
@@ -51,9 +55,14 @@ class GridWorld:
         self.episode_id = ""
         self.sensor_range = sensor_range
         self.sensor_noise_p = sensor_noise_p
+        self.battery_max = battery_max
+        self.cost_move = cost_move
+        self.cost_turn = cost_turn
+        self.cost_stop = cost_stop
         self._rng = random.Random(seed)
         self.obstacles: set[tuple[int, int]] = set()
         self.robot = RobotState(0, 0, 0)
+        self.start = (0, 0)
         self.goal = GoalState(0, 0)
         self.metrics = WorldMetrics()
         self.last_reward = 0.0
@@ -68,7 +77,8 @@ class GridWorld:
         self.obstacles = generate_obstacles(self.width, self.height, self.seed)
         start = random_free_cell(self.width, self.height, self.obstacles, self.seed + 1)
         goal = random_free_cell(self.width, self.height, self.obstacles | {start}, self.seed + 2)
-        self.robot = RobotState(start[0], start[1], direction=0)
+        self.start = start
+        self.robot = RobotState(start[0], start[1], direction=0, energy=self.battery_max)
         self.goal = GoalState(goal[0], goal[1])
         self.last_reward = 0.0
 
@@ -93,13 +103,17 @@ class GridWorld:
         action_type = str(action.get("type", "robot.stop"))
         prev_distance = self._distance()
         collision = False
+        energy_cost = self.cost_stop
 
         if action_type == "robot.turn_left":
+            energy_cost = self.cost_turn
             self.robot.direction = (self.robot.direction - 1) % 4
         elif action_type == "robot.turn_right":
+            energy_cost = self.cost_turn
             self.robot.direction = (self.robot.direction + 1) % 4
         elif action_type == "robot.move_forward":
             amount = int(action.get("amount", 1))
+            energy_cost = self.cost_move * max(1, amount)
             dx, dy = DIR_TO_VEC[self.robot.direction]
             target = (self.robot.x + dx * amount, self.robot.y + dy * amount)
             if (
@@ -114,19 +128,11 @@ class GridWorld:
             else:
                 self.robot.x, self.robot.y = target
 
+        self.robot.energy = max(0.0, self.robot.energy - energy_cost)
+
         self.metrics.tick += 1
         reached_goal = self.robot.x == self.goal.x and self.robot.y == self.goal.y
-        current_distance = self._distance()
-        step_reward = compute_step_reward(
-            RewardInput(
-                prev_distance=prev_distance,
-                current_distance=current_distance,
-                collision=collision,
-                reached_goal=reached_goal,
-            )
-        )
-        self.last_reward = step_reward
-        self.metrics.cumulative_reward += step_reward
+        battery_depleted = (not reached_goal) and self.robot.energy <= 0.0
 
         if reached_goal:
             self.metrics.done = True
@@ -137,6 +143,22 @@ class GridWorld:
         elif self.metrics.collisions >= self.collision_limit:
             self.metrics.done = True
             self.metrics.reason = "collision"
+        elif battery_depleted:
+            self.metrics.done = True
+            self.metrics.reason = "battery_depleted"
+
+        current_distance = self._distance()
+        step_reward = compute_step_reward(
+            RewardInput(
+                prev_distance=prev_distance,
+                current_distance=current_distance,
+                collision=collision,
+                reached_goal=reached_goal,
+                battery_depleted=self.metrics.done and self.metrics.reason == "battery_depleted",
+            )
+        )
+        self.last_reward = step_reward
+        self.metrics.cumulative_reward += step_reward
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -152,6 +174,7 @@ class GridWorld:
                     "energy": self.robot.energy,
                 },
                 "goal": {"x": self.goal.x, "y": self.goal.y},
+                "start": {"x": self.start[0], "y": self.start[1]},
             },
             "metrics": {
                 "reward": self.last_reward,
@@ -160,5 +183,6 @@ class GridWorld:
                 "collisions": self.metrics.collisions,
                 "done": self.metrics.done,
                 "reason": self.metrics.reason,
+                "energy": self.robot.energy,
             },
         }
