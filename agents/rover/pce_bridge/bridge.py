@@ -13,7 +13,7 @@ class PCEBridge:
     def __init__(
         self,
         events_url: str | None = None,
-        timeout_seconds: float = 0.25,
+        timeout_seconds: float = 5.0,
     ) -> None:
         self.events_url = events_url or os.getenv("PCE_EVENTS_URL", "http://127.0.0.1:8000/events")
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
