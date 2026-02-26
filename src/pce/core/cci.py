@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import pstdev
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -48,3 +50,39 @@ class CCIMetric:
             + self.weight_predictive_accuracy * data.predictive_accuracy
         )
         return max(0.0, min(1.0, weighted))
+
+    def from_state_manager(self, state_manager: Any) -> tuple[float, CCIInput]:
+        """Derive all CCI components from real action traces in StateManager."""
+        recent_actions = state_manager.get_recent_actions(20)
+        if not recent_actions:
+            baseline = CCIInput(0.5, 0.5, 0.0, 0.5)
+            return self.compute(baseline), baseline
+
+        respected_count = sum(1 for action in recent_actions if action["respected_values"])
+        decision_consistency = respected_count / len(recent_actions)
+
+        priorities = [int(action["priority"]) for action in recent_actions]
+        if len(priorities) == 1:
+            priority_stability = 1.0
+        else:
+            spread = min(1.0, pstdev(priorities) / 3.0)
+            priority_stability = 1.0 - spread
+
+        contradictions = state_manager.calculate_contradictions()
+        contradiction_rate = float(contradictions["contradiction_rate"])
+
+        accuracies: list[float] = []
+        for action in recent_actions:
+            expected = float(action["expected_impact"])
+            observed = float(action["observed_impact"])
+            error = abs(expected - observed)
+            accuracies.append(max(0.0, 1.0 - error))
+        predictive_accuracy = sum(accuracies) / len(accuracies)
+
+        components = CCIInput(
+            decision_consistency=decision_consistency,
+            priority_stability=priority_stability,
+            contradiction_rate=contradiction_rate,
+            predictive_accuracy=predictive_accuracy,
+        )
+        return self.compute(components), components
