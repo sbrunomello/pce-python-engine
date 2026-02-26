@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any
 
 import httpx
@@ -9,8 +10,16 @@ from .contracts import FEEDBACK_EVENT_TYPE, OBSERVATION_EVENT_TYPE
 
 
 class PCEBridge:
-    def __init__(self, events_url: str = "http://127.0.0.1:8000/events") -> None:
-        self.events_url = events_url
+    def __init__(
+        self,
+        events_url: str | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> None:
+        self.events_url = events_url or os.getenv("PCE_EVENTS_URL", "http://127.0.0.1:8000/events")
+        self._client = httpx.AsyncClient(timeout=timeout_seconds)
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
     async def decide(self, observation_payload: dict[str, Any], trace_id: str) -> dict[str, Any]:
         payload = {
@@ -22,10 +31,9 @@ class PCEBridge:
                 **observation_payload,
             },
         }
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.post(self.events_url, json=payload)
-            response.raise_for_status()
-            result = response.json()
+        response = await self._client.post(self.events_url, json=payload)
+        response.raise_for_status()
+        result = response.json()
         return self._adapt_action(result.get("action"), observation_payload)
 
     async def send_feedback(self, feedback_payload: dict[str, Any]) -> None:
@@ -38,9 +46,8 @@ class PCEBridge:
                 **feedback_payload,
             },
         }
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.post(self.events_url, json=payload)
-            response.raise_for_status()
+        response = await self._client.post(self.events_url, json=payload)
+        response.raise_for_status()
 
     def _adapt_action(
         self, pce_action: object, observation_payload: dict[str, Any]

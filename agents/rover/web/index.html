@@ -7,20 +7,44 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main>
-      <section>
+    <main class="layout">
+      <section class="card canvas-card">
+        <div class="card-header">
+          <h1>Rover</h1>
+          <span id="statusBadge" class="badge stopped">STOPPED</span>
+        </div>
         <canvas id="sim" width="800" height="600"></canvas>
       </section>
-      <aside>
-        <h1>Rover</h1>
-        <div class="controls">
-          <button id="start">Start</button>
-          <button id="stop">Stop</button>
-          <button id="reset">Reset</button>
-        </div>
-        <pre id="metrics"></pre>
-        <h3>Logs</h3>
-        <div id="logs"></div>
+
+      <aside class="sidebar">
+        <section class="card">
+          <h2>Controls</h2>
+          <div class="controls">
+            <button id="start" class="btn primary">Start</button>
+            <button id="stop" class="btn">Stop</button>
+            <button id="reset" class="btn warn">Reset</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <h2>Metrics</h2>
+            <button id="toggleRaw" class="btn tiny">Raw JSON</button>
+          </div>
+          <dl id="metrics" class="metrics"></dl>
+          <pre id="metricsRaw" class="raw hidden"></pre>
+        </section>
+
+        <section class="card logs-card">
+          <div class="card-header">
+            <h2>Logs</h2>
+            <div class="logs-tools">
+              <label><input id="autoScroll" type="checkbox" checked /> Auto-scroll</label>
+              <button id="clearLogs" class="btn tiny">Clear</button>
+            </div>
+          </div>
+          <div id="logs"></div>
+        </section>
       </aside>
     </main>
     <script src="./app.js"></script>

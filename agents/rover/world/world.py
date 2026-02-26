@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 from uuid import uuid4
 
 from .maps import generate_obstacles, random_free_cell
@@ -39,6 +40,8 @@ class GridWorld:
         seed: int = 42,
         max_steps: int = 2000,
         collision_limit: int = 20,
+        sensor_range: int = 3,
+        sensor_noise_p: float = 0.10,
     ) -> None:
         self.width = width
         self.height = height
@@ -46,6 +49,9 @@ class GridWorld:
         self.max_steps = max_steps
         self.collision_limit = collision_limit
         self.episode_id = ""
+        self.sensor_range = sensor_range
+        self.sensor_noise_p = sensor_noise_p
+        self._rng = random.Random(seed)
         self.obstacles: set[tuple[int, int]] = set()
         self.robot = RobotState(0, 0, 0)
         self.goal = GoalState(0, 0)
@@ -58,6 +64,7 @@ class GridWorld:
             self.seed = seed
         self.episode_id = str(uuid4())
         self.metrics = WorldMetrics()
+        self._rng = random.Random(self.seed)
         self.obstacles = generate_obstacles(self.width, self.height, self.seed)
         start = random_free_cell(self.width, self.height, self.obstacles, self.seed + 1)
         goal = random_free_cell(self.width, self.height, self.obstacles | {start}, self.seed + 2)
@@ -75,6 +82,9 @@ class GridWorld:
             self.width,
             self.height,
             self.obstacles,
+            max_range=self.sensor_range,
+            sensor_noise_p=self.sensor_noise_p,
+            rng=self._rng,
         )
 
     def apply_action(self, action: dict[str, object]) -> None:

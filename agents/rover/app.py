@@ -29,7 +29,10 @@ class RoverRuntime:
         self.clients: set[WebSocket] = set()
         self.task: asyncio.Task[None] | None = None
         self.running = False
-        self.tick_rate_hz = 15
+        self.tick_rate_hz = 120
+        self.frame_rate_hz = 20
+        self.log_every = 1
+        self.feedback_every = 2
         self.reward_window: list[float] = []
         self.window_size = 100
 
@@ -41,12 +44,21 @@ class RoverRuntime:
 
     async def stop(self) -> None:
         self.running = False
-        if self.task and not self.task.done():
+        if not self.task:
+            return
+        if asyncio.current_task() is self.task:
+            return
+        if not self.task.done():
             self.task.cancel()
             try:
                 await self.task
             except asyncio.CancelledError:
                 pass
+        self.task = None
+
+    async def shutdown(self) -> None:
+        await self.stop()
+        await self.bridge.close()
 
     async def reset(self) -> None:
         await self.stop()
@@ -55,6 +67,7 @@ class RoverRuntime:
         await self.broadcast(self._init_payload())
 
     async def _loop(self) -> None:
+        render_every = max(1, int(self.tick_rate_hz / self.frame_rate_hz))
         try:
             while self.running:
                 snapshot = self.world.snapshot()
@@ -73,30 +86,39 @@ class RoverRuntime:
                 action = await self.bridge.decide(observation, trace_id)
                 self.world.apply_action(action)
                 state = self.world.snapshot()
-                feedback = build_feedback_payload(state)
-                await self.bridge.send_feedback(feedback)
+
+                if state["tick"] % self.feedback_every == 0 or bool(state["metrics"]["done"]):
+                    feedback = build_feedback_payload(state)
+                    await self.bridge.send_feedback(feedback)
 
                 self.reward_window.append(float(state["metrics"]["reward"]))
                 if len(self.reward_window) > self.window_size:
                     self.reward_window.pop(0)
 
-                log_item = self.logger.log(
-                    level="info",
-                    component="rover.loop",
-                    message="tick_processed",
-                    trace_id=trace_id,
-                    data={
-                        "sensors": observation["sensors"],
-                        "action": action,
-                        "reward": state["metrics"]["reward"],
-                    },
-                )
-                await self.broadcast(self._frame_payload(action))
-                await self.broadcast(log_item)
+                if state["tick"] % self.log_every == 0:
+                    log_item = self.logger.log(
+                        level="info",
+                        component="rover.loop",
+                        message="tick_processed",
+                        trace_id=trace_id,
+                        data={
+                            "sensors": observation["sensors"],
+                            "action": action,
+                            "reward": state["metrics"]["reward"],
+                        },
+                    )
+                    await self.broadcast(log_item)
+
+                if state["tick"] % render_every == 0 or bool(state["metrics"]["done"]):
+                    await self.broadcast(self._frame_payload(action))
 
                 if bool(state["metrics"]["done"]):
                     self.running = False
+                    break
+
                 await asyncio.sleep(1.0 / self.tick_rate_hz)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             self.logger.log(
                 level="error",
@@ -106,6 +128,9 @@ class RoverRuntime:
                 data={"error": str(exc)},
             )
             self.running = False
+        finally:
+            if asyncio.current_task() is self.task:
+                self.task = None
 
     def _init_payload(self) -> dict[str, Any]:
         return {
@@ -155,6 +180,11 @@ class RoverRuntime:
 
 
 runtime = RoverRuntime()
+
+
+@router.on_event("shutdown")
+async def shutdown_runtime() -> None:
+    await runtime.shutdown()
 
 
 @router.get(BASE_PATH + "/")
