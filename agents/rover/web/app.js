@@ -70,7 +70,7 @@ function draw() {
   ctx.strokeRect(world.goal.x * tileW + 1, world.goal.y * tileH + 1, Math.max(1, tileW - 2), Math.max(1, tileH - 2));
 
   const triangle = directionTriangle(world.robot, tileW, tileH);
-  ctx.fillStyle = "#60a5fa";
+  ctx.fillStyle = "#ef4444";
   ctx.beginPath();
   ctx.moveTo(triangle[0][0], triangle[0][1]);
   ctx.lineTo(triangle[1][0], triangle[1][1]);
