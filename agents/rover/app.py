@@ -30,7 +30,8 @@ class RoverRuntime:
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.tick_rate_hz = 120
-        self.frame_rate_hz = 10
+        # Render each simulation tick so the UI stays aligned with the runtime loop.
+        self.frame_rate_hz = self.tick_rate_hz
         self.log_every = 1
         self.feedback_every = 2
         self.reward_window: list[float] = []
@@ -68,9 +69,8 @@ class RoverRuntime:
 
     async def _loop(self) -> None:
         try:
+            render_every = max(1, int(self.tick_rate_hz / max(1, self.frame_rate_hz)))
             while self.running:
-                # Keep rendering cadence independent from log throttling.
-                render_every = max(1, int(self.tick_rate_hz / max(1, self.frame_rate_hz)))
                 snapshot = self.world.snapshot()
                 sensors = self.world.sensors()
                 observation = build_observation_payload(
