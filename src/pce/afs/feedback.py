@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from pce.core.types import ExecutionResult
-from pce.robotics.rl import ROBOT_ACTIONS, q_learning_update
+from pce.robotics.rl import ROBOT_ACTIONS, build_state_key, q_learning_update
 from pce.sm.manager import StateManager
 
 
@@ -91,7 +91,21 @@ class AdaptiveFeedbackSystem:
 
         state_key = str(transition.get("state_key", ""))
         action = str(transition.get("action", ""))
-        next_state_key = str(episode.get("last_state_key", state_key))
+        next_observation = feedback.get("next_observation")
+        if isinstance(next_observation, dict):
+            next_state_key = build_state_key(next_observation)
+        else:
+            next_state_key = str(episode.get("last_state_key", state_key))
+            print(
+                json.dumps(
+                    {
+                        "event": "q_update_missing_next_observation",
+                        "episode_id": episode_id,
+                        "tick": feedback.get("tick", transition.get("tick", 0)),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         reward = float(feedback.get("reward", 0.0))
         done = bool(feedback.get("done", False))
         tick = int(feedback.get("tick", transition.get("tick", 0)))
@@ -139,6 +153,7 @@ class AdaptiveFeedbackSystem:
             "old_q": old_q,
             "new_q": new_q,
             "max_next": max_next,
+            "next_state_key": next_state_key,
             "epsilon": new_epsilon,
             "done": done,
         }
