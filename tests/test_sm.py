@@ -47,3 +47,24 @@ def test_state_manager_action_methods(tmp_path: Path) -> None:
     contradictions = sm.calculate_contradictions()
     assert contradictions["total_actions"] == 1
     assert contradictions["contradiction_rate"] == 1.0
+
+
+def test_state_manager_plugin_kv_methods(tmp_path: Path) -> None:
+    db = tmp_path / "plugin.db"
+    sm = StateManager(f"sqlite:///{db}")
+
+    assert sm.plugin_get_json("robotics", "params") is None
+    sm.plugin_set_json("robotics", "params", {"epsilon": 0.7})
+    sm.plugin_set_json("robotics", "q:s1", {"FWD": 1.0})
+
+    params = sm.plugin_get_json("robotics", "params")
+    assert isinstance(params, dict)
+    assert float(params["epsilon"]) == 0.7
+
+    listed = sm.plugin_list_prefix("robotics", "q:")
+    assert len(listed) == 1
+    assert listed[0][0] == "q:s1"
+
+    deleted = sm.plugin_delete_prefix("robotics", "q:")
+    assert deleted == 1
+    assert sm.plugin_list_prefix("robotics", "q:") == []

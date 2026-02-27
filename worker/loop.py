@@ -11,7 +11,7 @@ from pce.core.cci import CCIMetric
 from pce.core.config import Settings
 from pce.de.engine import DecisionEngine
 from pce.epl.processor import EventProcessingLayer
-from pce.examples.scenarios import financial_event_example, robot_event_example
+from pce.examples.scenarios import autonomous_event_example, financial_event_example
 from pce.isi.integrator import InternalStateIntegrator
 from pce.sm.manager import StateManager
 from pce.vel.evaluator import ValueEvaluationLayer
@@ -29,7 +29,7 @@ def run_loop(iterations: int = 10, sleep_s: float = 0.05) -> None:
     afs = AdaptiveFeedbackSystem()
     cci_metric = CCIMetric()
 
-    events = [financial_event_example(), robot_event_example()]
+    events = [financial_event_example(), autonomous_event_example()]
     for index in range(iterations):
         raw = events[index % len(events)]
         event = epl.ingest(raw)

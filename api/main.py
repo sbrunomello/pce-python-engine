@@ -13,10 +13,17 @@ from pce.afs.feedback import AdaptiveFeedbackSystem
 from pce.ao.orchestrator import ActionOrchestrator
 from pce.core.cci import CCIMetric
 from pce.core.config import Settings
+from pce.core.plugins import PluginRegistry
 from pce.core.types import ExecutionResult
 from pce.de.engine import DecisionEngine
 from pce.epl.processor import EventProcessingLayer
 from pce.isi.integrator import InternalStateIntegrator
+from pce.plugins.robotics import (
+    RoboticsAdaptationPlugin,
+    RoboticsDecisionPlugin,
+    RoboticsStorage,
+    RoboticsValueModelPlugin,
+)
 from pce.sm.manager import StateManager
 from pce.vel.evaluator import ValueEvaluationLayer
 
@@ -28,10 +35,16 @@ epl = EventProcessingLayer(settings.event_schema_path)
 isi = InternalStateIntegrator()
 vel = ValueEvaluationLayer()
 sm = StateManager(settings.db_url)
-de = DecisionEngine(sm)
+de = DecisionEngine()
 ao = ActionOrchestrator()
-afs = AdaptiveFeedbackSystem(sm)
+afs = AdaptiveFeedbackSystem()
 cci_metric = CCIMetric()
+
+plugin_registry = PluginRegistry()
+robotics_storage = RoboticsStorage(sm)
+plugin_registry.register_value_model(RoboticsValueModelPlugin())
+plugin_registry.register_decision(RoboticsDecisionPlugin(robotics_storage))
+plugin_registry.register_adaptation(RoboticsAdaptationPlugin(robotics_storage))
 
 
 class EventIn(BaseModel):
@@ -44,7 +57,7 @@ class EventIn(BaseModel):
 
 @app.post("/events")
 def process_event(event_in: EventIn) -> dict[str, object]:
-    """End-to-end event processing pipeline entrypoint with real CCI computation."""
+    """End-to-end event processing pipeline entrypoint with plugin dispatch."""
     try:
         event = epl.ingest(event_in.model_dump())
     except ValueError as exc:
@@ -54,45 +67,30 @@ def process_event(event_in: EventIn) -> dict[str, object]:
     updated_state = isi.integrate(state, event)
     sm.remember_event(event)
 
-    strategic_values = updated_state.get("strategic_values")
-    value_score = vel.evaluate_event(
-        event, strategic_values if isinstance(strategic_values, dict) else None
-    )
-
-    domain = event.payload.get("domain")
-    event_type = event.event_type
-
-    if domain == "robotics" and event_type.startswith("feedback.robotics"):
-        feedback_result = ExecutionResult(
-            action_type="robotics.feedback",
-            success=True,
-            observed_impact=float(event.payload.get("reward", 0.0)),
-            notes="robotics feedback ingestion",
-            metadata={"feedback": event.payload},
-        )
-        adapted_state = afs.adapt(updated_state, feedback_result)
-        sm.save_state(adapted_state)
-
-        cci, components = cci_metric.from_state_manager(sm)
-        q_update = adapted_state.get("robotics_rl", {})
-        return {
-            "event_id": event.event_id,
-            "updated": bool(q_update),
-            "epsilon": q_update.get("epsilon"),
-            "q_update": q_update,
-            "value_score": value_score,
-            "cci": cci,
-            "cci_components": {
-                "decision_consistency": components.decision_consistency,
-                "priority_stability": components.priority_stability,
-                "contradiction_rate": components.contradiction_rate,
-                "predictive_accuracy": components.predictive_accuracy,
-            },
-        }
+    value_score = plugin_registry.evaluate(event, updated_state, fallback=vel.evaluate_event)
 
     cci, components = cci_metric.from_state_manager(sm)
-    plan = de.deliberate(updated_state, value_score, cci)
-    result = ao.execute(plan)
+    plan = plugin_registry.deliberate(
+        event,
+        updated_state,
+        value_score,
+        cci,
+        fallback=de.deliberate,
+    )
+
+    if event.event_type.startswith("feedback."):
+        result = ExecutionResult(
+            action_type=event.event_type,
+            success=True,
+            observed_impact=float(event.payload.get("reward", 0.0)),
+            notes="feedback ingestion",
+            metadata={"feedback": event.payload},
+        )
+    else:
+        result = plugin_registry.execute(plan, fallback=ao.execute)
+
+    adapted_state = plugin_registry.adapt(updated_state, event, result, fallback=afs.adapt)
+    sm.save_state(adapted_state)
 
     violated_values = [] if value_score >= 0.6 else ["long_term_coherence"]
     respected_values = len(violated_values) == 0
@@ -107,42 +105,41 @@ def process_event(event_in: EventIn) -> dict[str, object]:
         observed_impact=result.observed_impact,
         respected_values=respected_values,
         violated_values=violated_values,
-        metadata={"rationale": plan.rationale, "robot_action": plan.metadata.get("robot_action")},
+        metadata={"rationale": plan.rationale, "plan_metadata": plan.metadata},
     )
 
-    # recompute with new action included and persist to history
     cci, components = cci_metric.from_state_manager(sm)
+    cci_payload = {
+        "decision_consistency": components.decision_consistency,
+        "priority_stability": components.priority_stability,
+        "contradiction_rate": components.contradiction_rate,
+        "predictive_accuracy": components.predictive_accuracy,
+    }
     sm.save_cci_snapshot(
         cci_id=str(uuid4()),
         cci=cci,
-        metrics={
-            "decision_consistency": components.decision_consistency,
-            "priority_stability": components.priority_stability,
-            "contradiction_rate": components.contradiction_rate,
-            "predictive_accuracy": components.predictive_accuracy,
-        },
+        metrics=cci_payload,
     )
 
-    result.metadata["violated_values"] = violated_values
-    adapted_state = afs.adapt(updated_state, result)
-    sm.save_state(adapted_state)
-
-    action_payload = plan.metadata.get("robot_action", plan.action_type)
-    return {
+    action_payload = plan.metadata.get("action_payload", plan.action_type)
+    response: dict[str, object] = {
         "event_id": event.event_id,
         "value_score": value_score,
         "cci": cci,
-        "cci_components": {
-            "decision_consistency": components.decision_consistency,
-            "priority_stability": components.priority_stability,
-            "contradiction_rate": components.contradiction_rate,
-            "predictive_accuracy": components.predictive_accuracy,
-        },
+        "cci_components": cci_payload,
         "action_type": plan.action_type,
         "action": action_payload,
         "metadata": plan.metadata,
         "success": result.success,
     }
+
+    if event.event_type.startswith("feedback."):
+        q_update = adapted_state.get("robotics_rl")
+        response["updated"] = bool(q_update)
+        response["epsilon"] = q_update.get("epsilon") if isinstance(q_update, dict) else None
+        response["q_update"] = q_update if isinstance(q_update, dict) else {}
+
+    return response
 
 
 @app.get("/cci")
@@ -166,13 +163,13 @@ def get_cci_history() -> dict[str, object]:
 
 @app.post("/agents/rover/control/clear_policy")
 def clear_rover_policy() -> dict[str, object]:
-    """Reset persisted robotics RL policy and hyperparameters."""
-    sm.clear_robotics_policy()
+    """Reset rover plugin RL policy and episode state."""
+    defaults = robotics_storage.clear_policy()
     state = sm.load_state()
     if "robotics" in state:
         state["robotics"] = {}
         sm.save_state(state)
-    return {"status": "cleared", "defaults": sm.get_robotics_params()}
+    return {"status": "cleared", "defaults": defaults}
 
 
 @app.post("/agents/rover/control/reset_stats")

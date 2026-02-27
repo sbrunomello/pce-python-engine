@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from api.main import app
-from pce.robotics.rl import build_state_key, q_learning_update
+from pce.plugins.robotics.rl import build_state_key, q_learning_update
 
 
 def _observation_event() -> dict[str, object]:
