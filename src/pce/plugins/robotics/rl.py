@@ -1,4 +1,4 @@
-"""Tabular Q-learning helpers for robotics domain."""
+"""Tabular Q-learning helpers for robotics plugin."""
 
 from __future__ import annotations
 

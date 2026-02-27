@@ -18,13 +18,13 @@ def financial_event_example() -> dict[str, object]:
     }
 
 
-def robot_event_example() -> dict[str, object]:
+def autonomous_event_example() -> dict[str, object]:
     """Simple autonomous robot example: sensor + goals event."""
     return {
         "event_type": "robot.sensor",
         "source": "robot-core",
         "payload": {
-            "domain": "robotics",
+            "domain": "autonomous",
             "obstacle_distance_m": 1.8,
             "battery_level": 0.64,
             "goal": "reach_waypoint_A",
