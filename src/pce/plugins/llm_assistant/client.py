@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import re
 from collections.abc import Coroutine
 from typing import Any
 
@@ -93,6 +94,13 @@ class OpenRouterClient:
                     await asyncio.sleep(0.1)
                     continue
                 raise OpenRouterError("OpenRouter timeout after retry") from exc
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                body_excerpt = _extract_response_excerpt(exc.response.text, limit=500)
+                raise OpenRouterError(
+                    "OpenRouter request failed "
+                    f"(status={status_code}, body={body_excerpt!r})"
+                ) from exc
             except (httpx.HTTPError, ValueError) as exc:
                 raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
 
@@ -126,3 +134,11 @@ def _run_coro_sync(coro: Coroutine[Any, Any, str]) -> str:
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(asyncio.run, coro)
         return future.result()
+
+
+def _extract_response_excerpt(raw_text: str, *, limit: int) -> str:
+    """Normalize body text and keep only a short excerpt for safe diagnostics."""
+    compact = re.sub(r"\s+", " ", raw_text).strip()
+    if not compact:
+        return "<empty>"
+    return compact[:limit]

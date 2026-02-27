@@ -135,33 +135,57 @@ curl -X POST http://127.0.0.1:8000/events \
 
 ### 5.4 Configuração OpenRouter (plugin assistant)
 
-Para habilitar o domínio `assistant` via `observation.assistant.v1`, preencha o arquivo de credenciais `config/openrouter_credentials.json`:
+Para habilitar o domínio `assistant` via `observation.assistant.v1`, configure o OpenRouter por **ENV (principal)** ou por **arquivo JSON**.
+
+#### A) Configuração via ENV (principal)
+
+```bash
+export OPENROUTER_API_KEY="<sua-chave-openrouter>"
+export OPENROUTER_MODEL="meta-llama/llama-3.2-3b-instruct:free"
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1/chat/completions"
+export OPENROUTER_TIMEOUT_S="12"
+export OPENROUTER_HTTP_REFERER="https://seu-app"
+export OPENROUTER_X_TITLE="pce-python-engine"
+```
+
+> Dica: em modelos free, prefira `OPENROUTER_TIMEOUT_S` entre **10 e 15 segundos** para reduzir falsos timeout.
+
+#### B) Configuração via arquivo JSON (`OPENROUTER_CONFIG_PATH`)
+
+```bash
+export OPENROUTER_CONFIG_PATH="config/openrouter_credentials.json"
+```
+
+Exemplo de arquivo:
 
 ```json
 {
   "api_key": "<sua-chave-openrouter>",
   "model": "meta-llama/llama-3.2-3b-instruct:free",
   "base_url": "https://openrouter.ai/api/v1/chat/completions",
-  "timeout_s": 5.0,
+  "timeout_s": 12.0,
   "http_referer": "https://seu-app",
   "x_title": "pce-python-engine"
 }
 ```
 
 Observações:
-- O backend lê esse arquivo no boot da API.
-- Para usar outro caminho, defina `OPENROUTER_CREDENTIALS_FILE` apontando para um JSON compatível.
-- Se o arquivo não existir, o sistema sobe com defaults e mantém fallback controlado para `assistant.reply`.
+- A resolução de configuração ocorre por campo: **ENV > JSON > defaults**.
+- `OPENROUTER_CREDENTIALS_FILE` segue aceito por retrocompatibilidade.
+- Se não houver chave/modelo válidos, o sistema mantém fallback controlado em `assistant.reply`.
 
 Com esse plugin ativo, a camada de decisão (DE) usa:
 - **bandit epsilon-greedy** para escolher perfil (`P0..P3`);
 - **override determinístico por VEL+CCI** para modo seguro quando `value_score`/`cci` caem abaixo dos thresholds;
-- `metadata.explain.de` com `selected_by_bandit`, `final_profile`, `override_reason` e `final_decoding`.
+- `metadata.explain.de` com `selected_by_bandit`, `final_profile`, `override_reason`, `final_decoding`, `prompt_hash` e `openrouter_error` quando houver falha.
 
 A adaptação (AFS) agora escreve memória causal por sessão:
 - feedback positivo (`reward > 0`) + `notes` atualiza `preferences`;
 - feedback negativo (`reward < 0`) + `notes` atualiza `avoid`;
 - `preferences` e `avoid` entram no system prompt do próximo turno.
+
+Quando a chamada ao OpenRouter falhar, o fallback de resposta é preservado e o motivo técnico aparece em:
+- `metadata.explain.de.openrouter_error` (mensagem curta sanitizada).
 
 Exemplos de payloads:
 
@@ -192,6 +216,13 @@ Exemplos de payloads:
   }
 }
 ```
+
+#### Troubleshooting OpenRouter
+
+- **401 Unauthorized**: validar `OPENROUTER_API_KEY`, permissões da conta e créditos.
+- **429 Too Many Requests**: throttling/rate limit; reduzir frequência de chamadas e adicionar backoff no cliente chamador.
+- **400 Bad Request**: geralmente modelo inválido (`OPENROUTER_MODEL`) ou payload fora do formato.
+- **Timeout**: aumentar `OPENROUTER_TIMEOUT_S` para 10–15s (especialmente em modelos free).
 
 Nota de runtime: o bridge síncrono (`generate_reply_sync`) é resiliente mesmo com event loop ativo no thread atual, executando a chamada async em thread dedicado quando necessário.
 

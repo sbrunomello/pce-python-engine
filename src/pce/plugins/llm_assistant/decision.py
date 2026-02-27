@@ -72,14 +72,29 @@ class AssistantDecisionPlugin(DecisionPlugin):
             "presence_penalty": float(final_choice.config["presence_penalty"]),
         }
 
+        openrouter_error: str | None = None
         try:
             reply_text = self._llm_client.generate_reply_sync(messages, **final_decoding)
-        except OpenRouterMissingAPIKeyError:
+        except OpenRouterMissingAPIKeyError as exc:
+            openrouter_error = _format_exception_short(exc)
+            _log_llm_error(
+                session_id=session_id,
+                model=getattr(self._llm_client, "model", "unknown"),
+                prompt_hash=prompt_hash,
+                error=openrouter_error,
+            )
             reply_text = (
                 "Configuração ausente/erro OpenRouter. Ajuste "
                 "OPENROUTER_API_KEY/OPENROUTER_MODEL."
             )
-        except OpenRouterError:
+        except OpenRouterError as exc:
+            openrouter_error = _format_exception_short(exc)
+            _log_llm_error(
+                session_id=session_id,
+                model=getattr(self._llm_client, "model", "unknown"),
+                prompt_hash=prompt_hash,
+                error=openrouter_error,
+            )
             reply_text = (
                 "Configuração ausente/erro OpenRouter. Ajuste "
                 "OPENROUTER_API_KEY/OPENROUTER_MODEL."
@@ -137,6 +152,7 @@ class AssistantDecisionPlugin(DecisionPlugin):
                 "final_decoding": final_decoding,
                 "model": getattr(self._llm_client, "model", "unknown"),
                 "prompt_hash": prompt_hash,
+                "openrouter_error": openrouter_error,
             },
             "ao": {"execution": "emitted"},
             "afs": {"pending": True},
@@ -232,3 +248,34 @@ def _sanitize_preview(text: str, *, limit: int) -> str:
     """Redact text for logs while preserving minimal observability."""
     compact = re.sub(r"\s+", " ", text).strip()
     return compact[:limit]
+
+
+def _log_llm_error(*, session_id: str, model: str, prompt_hash: str, error: str) -> None:
+    """Emit sanitized structured error logs for OpenRouter failures."""
+    print(
+        json.dumps(
+            {
+                "event": "llm_error",
+                "session_id": session_id,
+                "model": model,
+                "prompt_hash": prompt_hash,
+                "error": _sanitize_error_text(error),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+def _format_exception_short(exc: Exception, *, limit: int = 240) -> str:
+    """Build short error string preserving type and first message excerpt."""
+    error_text = f"{type(exc).__name__}: {exc}"
+    compact = re.sub(r"\s+", " ", error_text).strip()
+    return _sanitize_error_text(compact[:limit])
+
+
+def _sanitize_error_text(text: str) -> str:
+    """Redact sensitive tokens while keeping actionable diagnostics."""
+    redacted = re.sub(r"(?i)bearer\s+[a-z0-9._-]+", "Bearer [REDACTED]", text)
+    redacted = re.sub(r"(?i)(api[_-]?key\s*[=:]\s*)([^\s,;]+)", r"\1[REDACTED]", redacted)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "sk-[REDACTED]", redacted)
+    return redacted
