@@ -135,17 +135,23 @@ curl -X POST http://127.0.0.1:8000/events \
 
 ### 5.4 Configuração OpenRouter (plugin assistant)
 
-Para habilitar o domínio `assistant` via `observation.assistant.v1`, configure:
+Para habilitar o domínio `assistant` via `observation.assistant.v1`, preencha o arquivo de credenciais `config/openrouter_credentials.json`:
 
-```bash
-export OPENROUTER_API_KEY="<sua-chave>"
-export OPENROUTER_MODEL="meta-llama/llama-3.2-3b-instruct:free"
-export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1/chat/completions"
-export OPENROUTER_TIMEOUT_S="5.0"
-# opcionais
-export OPENROUTER_HTTP_REFERER="https://seu-app"
-export OPENROUTER_X_TITLE="pce-python-engine"
+```json
+{
+  "api_key": "<sua-chave-openrouter>",
+  "model": "meta-llama/llama-3.2-3b-instruct:free",
+  "base_url": "https://openrouter.ai/api/v1/chat/completions",
+  "timeout_s": 5.0,
+  "http_referer": "https://seu-app",
+  "x_title": "pce-python-engine"
+}
 ```
+
+Observações:
+- O backend lê esse arquivo no boot da API.
+- Para usar outro caminho, defina `OPENROUTER_CREDENTIALS_FILE` apontando para um JSON compatível.
+- Se o arquivo não existir, o sistema sobe com defaults e mantém fallback controlado para `assistant.reply`.
 
 Com esse plugin ativo, a camada de decisão (DE) usa:
 - **bandit epsilon-greedy** para escolher perfil (`P0..P3`);
