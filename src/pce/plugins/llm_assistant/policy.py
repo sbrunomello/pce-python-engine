@@ -53,6 +53,14 @@ class PolicyChoice:
     config: ProfileConfig
 
 
+@dataclass(slots=True)
+class PolicyOverrideResult:
+    """Result of optional deterministic safety override over bandit choice."""
+
+    choice: PolicyChoice
+    override_reason: str | None
+
+
 def default_policy_state() -> PolicyState:
     """Build default policy baseline."""
     return {
@@ -87,6 +95,49 @@ def choose_profile(policy_state: PolicyState) -> PolicyChoice:
         epsilon=epsilon,
         config=PROFILES[profile_id],
     )
+
+
+def apply_profile_override(
+    *,
+    choice: PolicyChoice,
+    value_score: float,
+    cci: float,
+) -> PolicyOverrideResult:
+    """Apply deterministic safety override when strategic confidence is low."""
+    if value_score < 0.55:
+        return PolicyOverrideResult(
+            choice=PolicyChoice(
+                profile_id="P0",
+                mode="override_safe",
+                epsilon=choice.epsilon,
+                # Clamp decoding to deterministic-safe values regardless of profile defaults.
+                config={
+                    "temperature": min(0.3, float(PROFILES["P0"]["temperature"])),
+                    "top_p": min(0.85, float(PROFILES["P0"]["top_p"])),
+                    "presence_penalty": 0.0,
+                },
+            ),
+            override_reason=f"override_safe: value_score={value_score:.2f} < 0.55",
+        )
+    if cci < 0.45:
+        return PolicyOverrideResult(
+            choice=PolicyChoice(
+                profile_id="P0",
+                mode="override_safe",
+                epsilon=choice.epsilon,
+                config={
+                    "temperature": min(0.3, float(PROFILES["P0"]["temperature"])),
+                    "top_p": min(0.85, float(PROFILES["P0"]["top_p"])),
+                    "presence_penalty": 0.0,
+                },
+            ),
+            override_reason=f"override_safe: cci={cci:.2f} < 0.45",
+        )
+
+    if value_score > 0.75 and cci > 0.65:
+        return PolicyOverrideResult(choice=choice, override_reason="no_override_high_confidence")
+
+    return PolicyOverrideResult(choice=choice, override_reason=None)
 
 
 def reward_from_feedback(payload: dict[str, object]) -> float:

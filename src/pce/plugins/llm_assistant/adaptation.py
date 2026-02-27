@@ -62,8 +62,14 @@ class AssistantAdaptationPlugin(AdaptationPlugin):
         self._storage.save_metrics(metrics)
 
         notes = payload.get("notes")
+        wrote_preference = False
+        wrote_avoid = False
         if isinstance(notes, str) and notes.strip() and reward > 0.0:
             self._storage.add_preference(session_id, notes)
+            wrote_preference = True
+        if isinstance(notes, str) and notes.strip() and reward < 0.0:
+            self._storage.add_avoid(session_id, notes)
+            wrote_avoid = True
 
         profile_stats = updated_policy["profiles"].get(profile_id, {"count": 0, "avg_reward": 0.0})
         afs_explain = {
@@ -75,6 +81,8 @@ class AssistantAdaptationPlugin(AdaptationPlugin):
                 "avg_reward": float(profile_stats["avg_reward"]),
             },
             "metrics": metrics,
+            "wrote_preference": wrote_preference,
+            "wrote_avoid": wrote_avoid,
         }
 
         print(
@@ -85,6 +93,8 @@ class AssistantAdaptationPlugin(AdaptationPlugin):
                     "reward": reward,
                     "updated_profile": profile_id,
                     "new_epsilon": updated_policy["epsilon"],
+                    "wrote_preference": wrote_preference,
+                    "wrote_avoid": wrote_avoid,
                 },
                 ensure_ascii=False,
             )

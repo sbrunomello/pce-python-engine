@@ -11,7 +11,7 @@ from typing import Any
 from pce.core.plugins import DecisionPlugin
 from pce.core.types import ActionPlan, PCEEvent
 from pce.plugins.llm_assistant.client import OpenRouterError, OpenRouterMissingAPIKeyError
-from pce.plugins.llm_assistant.policy import choose_profile
+from pce.plugins.llm_assistant.policy import apply_profile_override, choose_profile
 from pce.plugins.llm_assistant.storage import AssistantStorage
 from pce.plugins.llm_assistant.value_model import AssistantValueModelPlugin
 
@@ -51,7 +51,9 @@ class AssistantDecisionPlugin(DecisionPlugin):
 
         memory = self._storage.get_session_memory(session_id)
         policy_state = self._storage.get_policy_state()
-        choice = choose_profile(policy_state)
+        bandit_choice = choose_profile(policy_state)
+        override = apply_profile_override(choice=bandit_choice, value_score=value_score, cci=cci)
+        final_choice = override.choice
 
         strategic_values = state.get("strategic_values")
         strategic_values_dict = strategic_values if isinstance(strategic_values, dict) else {}
@@ -64,13 +66,14 @@ class AssistantDecisionPlugin(DecisionPlugin):
         serialized_prompt = json.dumps(messages, sort_keys=True).encode("utf-8")
         prompt_hash = hashlib.sha256(serialized_prompt).hexdigest()
 
+        final_decoding = {
+            "temperature": float(final_choice.config["temperature"]),
+            "top_p": float(final_choice.config["top_p"]),
+            "presence_penalty": float(final_choice.config["presence_penalty"]),
+        }
+
         try:
-            reply_text = self._llm_client.generate_reply_sync(
-                messages,
-                temperature=float(choice.config["temperature"]),
-                top_p=float(choice.config["top_p"]),
-                presence_penalty=float(choice.config["presence_penalty"]),
-            )
+            reply_text = self._llm_client.generate_reply_sync(messages, **final_decoding)
         except OpenRouterMissingAPIKeyError:
             reply_text = (
                 "Configuração ausente/erro OpenRouter. Ajuste "
@@ -87,8 +90,12 @@ class AssistantDecisionPlugin(DecisionPlugin):
         self._storage.set_pending_feedback(
             session_id,
             {
-                "profile_id": choice.profile_id,
-                "epsilon": choice.epsilon,
+                "profile_id": final_choice.profile_id,
+                "epsilon": bandit_choice.epsilon,
+                "bandit_profile_id": bandit_choice.profile_id,
+                "bandit_mode": bandit_choice.mode,
+                "final_mode": final_choice.mode,
+                "override_reason": override.override_reason,
                 "value_score": value_score,
                 "cci": cci,
                 "ts": event.timestamp.isoformat(),
@@ -110,14 +117,24 @@ class AssistantDecisionPlugin(DecisionPlugin):
                     "has_summary": bool(memory.get("summary")),
                     "msgs": len(memory.get("last_messages", [])),
                     "prefs": len(memory.get("preferences", [])),
+                    "avoid_count": len(memory.get("avoid", [])),
+                    "avoid_injected": bool(memory.get("avoid", [])),
                 },
             },
             "vel": {"value_score": value_score, "components": components},
             "cci": {"cci": cci, "components": {}},
             "de": {
-                "policy_profile": choice.profile_id,
-                "epsilon": choice.epsilon,
-                "mode": choice.mode,
+                "selected_by_bandit": {
+                    "profile_id": bandit_choice.profile_id,
+                    "mode": bandit_choice.mode,
+                    "epsilon": bandit_choice.epsilon,
+                },
+                "final_profile": {
+                    "profile_id": final_choice.profile_id,
+                    "mode": final_choice.mode,
+                },
+                "override_reason": override.override_reason,
+                "final_decoding": final_decoding,
                 "model": getattr(self._llm_client, "model", "unknown"),
                 "prompt_hash": prompt_hash,
             },
@@ -131,8 +148,11 @@ class AssistantDecisionPlugin(DecisionPlugin):
                 {
                     "event": "llm_decision",
                     "session_id": session_id,
-                    "profile": choice.profile_id,
-                    "epsilon": choice.epsilon,
+                    "profile": bandit_choice.profile_id,
+                    "final_profile": final_choice.profile_id,
+                    "mode": final_choice.mode,
+                    "override_reason": override.override_reason,
+                    "epsilon": bandit_choice.epsilon,
                     "value_score": value_score,
                     "cci": cci,
                     "latency_ms": round(latency_ms, 2),
@@ -148,8 +168,8 @@ class AssistantDecisionPlugin(DecisionPlugin):
         return ActionPlan(
             action_type="assistant.action",
             rationale=(
-                f"assistant profile={choice.profile_id} mode={choice.mode} "
-                f"epsilon={choice.epsilon:.4f}"
+                f"assistant profile={final_choice.profile_id} mode={final_choice.mode} "
+                f"epsilon={bandit_choice.epsilon:.4f}"
             ),
             priority=2,
             metadata={
@@ -170,8 +190,10 @@ class AssistantDecisionPlugin(DecisionPlugin):
         strategic_values: dict[str, object],
     ) -> list[dict[str, str]]:
         """Compose bounded OpenRouter conversation payload."""
-        preferences = [str(item) for item in memory.get("preferences", [])][:10]
-        pref_section = "\n".join(f"- {item[:80]}" for item in preferences) or "- none"
+        preferences = [str(item).strip()[:120] for item in memory.get("preferences", [])][:10]
+        avoids = [str(item).strip()[:120] for item in memory.get("avoid", [])][:10]
+        pref_section = "\n".join(f"- {item}" for item in preferences if item) or "- none"
+        avoid_section = "\n".join(f"- {item}" for item in avoids if item) or "- none"
 
         strategic_items = [f"{key}={value}" for key, value in strategic_values.items()]
         strategic_section = ", ".join(strategic_items[:8]) if strategic_items else "none"
@@ -184,6 +206,7 @@ class AssistantDecisionPlugin(DecisionPlugin):
                     "Você é um assistente útil, seguro e objetivo. "
                     "Responda em markdown com clareza. "
                     f"Preferências conhecidas:\n{pref_section}\n"
+                    f"Evitar:\n{avoid_section}\n"
                     f"Objetivos estratégicos: {strategic_section}."
                 ),
             },

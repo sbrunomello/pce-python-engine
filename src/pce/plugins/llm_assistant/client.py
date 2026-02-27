@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from collections.abc import Coroutine
 from typing import Any
 
@@ -118,10 +119,10 @@ class OpenRouterClient:
 def _run_coro_sync(coro: Coroutine[Any, Any, str]) -> str:
     """Execute coroutine safely from synchronous plugin code."""
     try:
-        return asyncio.run(coro)
+        asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(asyncio.run, coro)
+        return future.result()
