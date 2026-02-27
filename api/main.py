@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +19,13 @@ from pce.core.types import ExecutionResult
 from pce.de.engine import DecisionEngine
 from pce.epl.processor import EventProcessingLayer
 from pce.isi.integrator import InternalStateIntegrator
+from pce.plugins.llm_assistant import (
+    AssistantAdaptationPlugin,
+    AssistantDecisionPlugin,
+    AssistantStorage,
+    AssistantValueModelPlugin,
+    OpenRouterClient,
+)
 from pce.plugins.robotics import (
     RoboticsAdaptationPlugin,
     RoboticsDecisionPlugin,
@@ -42,9 +50,24 @@ cci_metric = CCIMetric()
 
 plugin_registry = PluginRegistry()
 robotics_storage = RoboticsStorage(sm)
+assistant_storage = AssistantStorage(sm)
+assistant_value_model = AssistantValueModelPlugin()
+assistant_client = OpenRouterClient(
+    api_key=os.getenv("OPENROUTER_API_KEY", ""),
+    model=os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free"),
+    base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+    timeout_s=float(os.getenv("OPENROUTER_TIMEOUT_S", "5.0")),
+    referer=os.getenv("OPENROUTER_HTTP_REFERER", ""),
+    title=os.getenv("OPENROUTER_X_TITLE", "pce-python-engine"),
+)
 plugin_registry.register_value_model(RoboticsValueModelPlugin())
+plugin_registry.register_value_model(assistant_value_model)
 plugin_registry.register_decision(RoboticsDecisionPlugin(robotics_storage))
+plugin_registry.register_decision(
+    AssistantDecisionPlugin(assistant_storage, assistant_value_model, assistant_client)
+)
 plugin_registry.register_adaptation(RoboticsAdaptationPlugin(robotics_storage))
+plugin_registry.register_adaptation(AssistantAdaptationPlugin(assistant_storage))
 
 
 class EventIn(BaseModel):
@@ -70,6 +93,12 @@ def process_event(event_in: EventIn) -> dict[str, object]:
     value_score = plugin_registry.evaluate(event, updated_state, fallback=vel.evaluate_event)
 
     cci, components = cci_metric.from_state_manager(sm)
+    cci_payload = {
+        "decision_consistency": components.decision_consistency,
+        "priority_stability": components.priority_stability,
+        "contradiction_rate": components.contradiction_rate,
+        "predictive_accuracy": components.predictive_accuracy,
+    }
     plan = plugin_registry.deliberate(
         event,
         updated_state,
@@ -77,6 +106,11 @@ def process_event(event_in: EventIn) -> dict[str, object]:
         cci,
         fallback=de.deliberate,
     )
+    explain = plan.metadata.get("explain")
+    if isinstance(explain, dict):
+        cci_explain = explain.get("cci")
+        if isinstance(cci_explain, dict):
+            cci_explain["components"] = cci_payload
 
     if event.event_type.startswith("feedback."):
         result = ExecutionResult(
@@ -138,6 +172,16 @@ def process_event(event_in: EventIn) -> dict[str, object]:
         response["updated"] = bool(q_update)
         response["epsilon"] = q_update.get("epsilon") if isinstance(q_update, dict) else None
         response["q_update"] = q_update if isinstance(q_update, dict) else {}
+        assistant_learning = adapted_state.get("assistant_learning")
+        if isinstance(assistant_learning, dict):
+            response["assistant_learning"] = assistant_learning
+            explain_metadata = response.get("metadata")
+            if isinstance(explain_metadata, dict):
+                explain_payload = explain_metadata.get("explain")
+                if isinstance(explain_payload, dict):
+                    explain_payload["afs"] = assistant_learning.get(
+                        "afs_explain", {"updated": True}
+                    )
 
     return response
 
@@ -178,6 +222,19 @@ async def reset_rover_stats() -> dict[str, object]:
     await rover_runtime.reset_stats()
     await rover_runtime.broadcast(rover_runtime._frame_payload({"type": "robot.stop"}))
     return {"status": "stats_reset"}
+
+
+@app.post("/agents/assistant/control/clear_memory")
+def clear_assistant_memory() -> dict[str, object]:
+    """Reset assistant plugin memory/policy and clear assistant state slice."""
+    deleted = assistant_storage.clear_all()
+    state = sm.load_state()
+    if "assistant" in state:
+        state["assistant"] = {}
+    if "assistant_learning" in state:
+        state["assistant_learning"] = {}
+    sm.save_state(state)
+    return {"status": "cleared", "deleted": deleted, "epsilon": 0.6}
 
 
 app.include_router(rover_router)

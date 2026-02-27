@@ -132,6 +132,23 @@ curl -X POST http://127.0.0.1:8000/events \
   }'
 ```
 
+
+### 5.4 Configuração OpenRouter (plugin assistant)
+
+Para habilitar o domínio `assistant` via `observation.assistant.v1`, configure:
+
+```bash
+export OPENROUTER_API_KEY="<sua-chave>"
+export OPENROUTER_MODEL="meta-llama/llama-3.2-3b-instruct:free"
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1/chat/completions"
+export OPENROUTER_TIMEOUT_S="5.0"
+# opcionais
+export OPENROUTER_HTTP_REFERER="https://seu-app"
+export OPENROUTER_X_TITLE="pce-python-engine"
+```
+
+Se a chave/modelo estiver ausente ou houver erro de chamada, a API retorna fallback controlado na ação `assistant.reply`.
+
 ## 6) Casos de uso reais
 
 ### 6.1 Agente financeiro empresarial
