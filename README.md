@@ -147,6 +147,48 @@ export OPENROUTER_HTTP_REFERER="https://seu-app"
 export OPENROUTER_X_TITLE="pce-python-engine"
 ```
 
+Com esse plugin ativo, a camada de decisão (DE) usa:
+- **bandit epsilon-greedy** para escolher perfil (`P0..P3`);
+- **override determinístico por VEL+CCI** para modo seguro quando `value_score`/`cci` caem abaixo dos thresholds;
+- `metadata.explain.de` com `selected_by_bandit`, `final_profile`, `override_reason` e `final_decoding`.
+
+A adaptação (AFS) agora escreve memória causal por sessão:
+- feedback positivo (`reward > 0`) + `notes` atualiza `preferences`;
+- feedback negativo (`reward < 0`) + `notes` atualiza `avoid`;
+- `preferences` e `avoid` entram no system prompt do próximo turno.
+
+Exemplos de payloads:
+
+```json
+{
+  "event_type": "observation.assistant.v1",
+  "source": "assistant-web",
+  "payload": {
+    "domain": "assistant",
+    "session_id": "sessao-123",
+    "text": "Me ajude a priorizar tarefas.",
+    "tags": ["observation", "assistant"]
+  }
+}
+```
+
+```json
+{
+  "event_type": "feedback.assistant.v1",
+  "source": "assistant-web",
+  "payload": {
+    "domain": "assistant",
+    "session_id": "sessao-123",
+    "reward": -1.0,
+    "rating": 2,
+    "accepted": false,
+    "notes": "não seja prolixo"
+  }
+}
+```
+
+Nota de runtime: o bridge síncrono (`generate_reply_sync`) é resiliente mesmo com event loop ativo no thread atual, executando a chamada async em thread dedicado quando necessário.
+
 Se a chave/modelo estiver ausente ou houver erro de chamada, a API retorna fallback controlado na ação `assistant.reply`.
 
 ## 6) Casos de uso reais
