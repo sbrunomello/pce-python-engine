@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -26,6 +25,7 @@ from pce.plugins.llm_assistant import (
     AssistantValueModelPlugin,
     OpenRouterClient,
 )
+from pce.plugins.llm_assistant.config import load_openrouter_credentials
 from pce.plugins.robotics import (
     RoboticsAdaptationPlugin,
     RoboticsDecisionPlugin,
@@ -52,13 +52,14 @@ plugin_registry = PluginRegistry()
 robotics_storage = RoboticsStorage(sm)
 assistant_storage = AssistantStorage(sm)
 assistant_value_model = AssistantValueModelPlugin()
+openrouter_credentials = load_openrouter_credentials()
 assistant_client = OpenRouterClient(
-    api_key=os.getenv("OPENROUTER_API_KEY", ""),
-    model=os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free"),
-    base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-    timeout_s=float(os.getenv("OPENROUTER_TIMEOUT_S", "5.0")),
-    referer=os.getenv("OPENROUTER_HTTP_REFERER", ""),
-    title=os.getenv("OPENROUTER_X_TITLE", "pce-python-engine"),
+    api_key=openrouter_credentials["api_key"],
+    model=openrouter_credentials["model"],
+    base_url=openrouter_credentials["base_url"],
+    timeout_s=float(openrouter_credentials["timeout_s"]),
+    referer=openrouter_credentials["referer"],
+    title=openrouter_credentials["title"],
 )
 plugin_registry.register_value_model(RoboticsValueModelPlugin())
 plugin_registry.register_value_model(assistant_value_model)
