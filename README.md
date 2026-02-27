@@ -189,6 +189,74 @@ Exemplos de payloads:
 
 Nota de runtime: o bridge síncrono (`generate_reply_sync`) é resiliente mesmo com event loop ativo no thread atual, executando a chamada async em thread dedicado quando necessário.
 
+
+### 5.5 Assistant UI (Vite + React + TypeScript)
+
+Interface web para testar rapidamente o plugin `assistant` sem alterar o backend.
+
+**Requisitos**
+- Node.js 18+
+- API FastAPI rodando em `http://127.0.0.1:8000` (ou URL definida por `VITE_API_BASE_URL`)
+
+**Como rodar**
+
+1. Suba a API:
+
+```bash
+uvicorn api.main:app --reload
+```
+
+2. Em outro terminal, suba a UI:
+
+```bash
+cd apps/ui-assistant
+npm i
+npm run dev
+```
+
+3. Abra a URL exibida pelo Vite (normalmente `http://127.0.0.1:5173`).
+
+**Proxy `/api` no desenvolvimento**
+- A UI chama sempre `/api/events`, `/api/state`, `/api/cci`, `/api/cci/history` e `/api/agents/assistant/control/clear_memory`.
+- O Vite faz proxy local para `VITE_API_BASE_URL` e remove o prefixo `/api`.
+- Valor padrão: `VITE_API_BASE_URL=http://127.0.0.1:8000`.
+- Para alterar: copie `apps/ui-assistant/.env.example` para `.env` e ajuste `VITE_API_BASE_URL`.
+
+**Payload de observação (assistente)**
+
+```json
+{
+  "event_type": "observation.assistant.v1",
+  "source": "assistant-ui",
+  "payload": {
+    "domain": "assistant",
+    "session_id": "local-dev",
+    "text": "Explique a diferença entre throughput e latência.",
+    "tags": ["observation", "assistant"],
+    "context": {"channel": "ui"}
+  }
+}
+```
+
+**Payload de feedback (AFS)**
+
+```json
+{
+  "event_type": "feedback.assistant.v1",
+  "source": "assistant-ui",
+  "payload": {
+    "domain": "assistant",
+    "session_id": "local-dev",
+    "reward": -1.0,
+    "rating": 2,
+    "accepted": false,
+    "notes": "não seja prolixo",
+    "tags": ["feedback", "assistant"]
+  }
+}
+```
+
+
 Se a chave/modelo estiver ausente ou houver erro de chamada, a API retorna fallback controlado na ação `assistant.reply`.
 
 ## 6) Casos de uso reais
