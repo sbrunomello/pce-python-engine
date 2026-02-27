@@ -92,10 +92,11 @@ class AssistantStorage:
             return {"last_messages": [], "summary": "", "preferences": [], "avoid": []}
 
         messages = stored.get("last_messages")
+        normalized_messages = list(messages)[-10:] if isinstance(messages, list) else []
         preferences = stored.get("preferences")
         avoid = stored.get("avoid")
         return {
-            "last_messages": messages if isinstance(messages, list) else [],
+            "last_messages": normalized_messages,
             "summary": str(stored.get("summary", ""))[:600],
             "preferences": _sanitize_memory_list(preferences),
             "avoid": _sanitize_memory_list(avoid),
