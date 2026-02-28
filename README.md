@@ -90,6 +90,57 @@ pip install -e .[dev]
 cp config/.env.example .env
 ```
 
+
+## 4.1) Rodar localmente no Windows
+
+### Pré-requisitos
+- Python **3.11+** (com launcher `py`)
+- Git
+
+### Setup oficial (PowerShell)
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -e pce-core -e pce-os -e agents/llm-assistant -e agents/rover
+# opcional: instalar extras consolidados
+# pip install -r requirements.txt
+```
+
+> Se o PowerShell bloquear scripts, execute uma vez (como usuário atual):
+>
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+### Quickstart Windows (5 comandos)
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -e pce-core -e pce-os -e agents/llm-assistant -e agents/rover
+uvicorn pce_api.main:app --reload --port 8080
+```
+
+### Testes no Windows
+
+```powershell
+pytest -q
+```
+
+### Demo PCE-OS (Windows)
+
+```powershell
+# 1) criar pendência de compra
+curl.exe -X POST "http://127.0.0.1:8080/events" -H "Content-Type: application/json" -d '{"event_type":"purchase.requested","source":"os-demo","payload":{"domain":"os.robotics","tags":["purchase"],"projected_cost":120.0,"risk_level":"MEDIUM"}}'
+# 2) listar pendências
+curl.exe "http://127.0.0.1:8080/os/approvals"
+# 3) aprovar e materializar purchase.completed
+curl.exe -X POST "http://127.0.0.1:8080/os/approvals/<APPROVAL_ID>/approve" -H "Content-Type: application/json" -d '{"actor":"operator","notes":"ok"}'
+# 4) checar twin
+curl.exe "http://127.0.0.1:8080/os/robotics/state"
+```
+
 ## 5) Quickstart: loop de worker + API
 
 ### 5.1 Rodar testes e checks mínimos
@@ -111,7 +162,7 @@ Saída esperada: linhas com `event`, `action`, `cci_before`, `cci_after`, `value
 ### 5.3 Subir API
 
 ```bash
-uvicorn api.main:app --reload
+uvicorn pce_api.main:app --reload
 ```
 
 Endpoints principais:
@@ -240,7 +291,7 @@ Interface web para testar rapidamente o plugin `assistant` sem alterar o backend
 1. Suba a API:
 
 ```bash
-uvicorn api.main:app --reload
+uvicorn pce_api.main:app --reload
 ```
 
 2. Em outro terminal, suba a UI:
