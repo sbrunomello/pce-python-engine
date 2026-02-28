@@ -11,3 +11,61 @@ body {
   margin: 0;
   min-height: 100vh;
 }
+
+.markdown-content {
+  overflow-wrap: anywhere;
+}
+
+.markdown-content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content pre,
+.markdown-content blockquote,
+.markdown-content table,
+.markdown-content hr {
+  margin: 0.5rem 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 1.25rem;
+}
+
+.markdown-content code {
+  border-radius: 0.25rem;
+  background: rgb(15 23 42 / 0.85);
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+.markdown-content pre {
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  background: rgb(15 23 42 / 0.95);
+  padding: 0.75rem;
+}
+
+.markdown-content pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.9em;
+}
+
+.markdown-content a {
+  color: rgb(129 140 248);
+  text-decoration: underline;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid rgb(71 85 105);
+  padding-left: 0.75rem;
+  color: rgb(203 213 225);
+}
