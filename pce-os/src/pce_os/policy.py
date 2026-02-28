@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from pce.core.types import ActionPlan
-from pce.sm.manager import StateManager
 
 _PENDING_APPROVALS_SLICE = "pending_approvals"
+logger = logging.getLogger(__name__)
 
 
 class ApprovalGate:
-    """Approve-to-execute policy manager using state slice persistence."""
-
-    def __init__(self, state_manager: StateManager) -> None:
-        self._sm = state_manager
+    """Approve-to-execute policy manager operating on state snapshots."""
 
     def decide_if_requires_approval(
         self,
@@ -46,12 +45,13 @@ class ApprovalGate:
         decision_id: str,
         plan: ActionPlan,
         snapshot_state: dict[str, object],
+        state: dict[str, object],
         metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Store pending approval request and return created record."""
-        approvals = self.list_pending()
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """Return created pending record and updated state (without persistence)."""
+        approvals = self._list_all_approvals(state)
         approval_id = str(uuid4())
-        record = {
+        record: dict[str, Any] = {
             "approval_id": approval_id,
             "decision_id": decision_id,
             "created_at": datetime.now(UTC).isoformat(),
@@ -71,53 +71,94 @@ class ApprovalGate:
             },
         }
         approvals.append(record)
-        self._save_pending(approvals)
-        return record
+        return record, self._write_approvals(state, approvals)
 
-    def approve(self, approval_id: str, actor: str, notes: str) -> dict[str, Any]:
-        """Mark approval approved and return event payload for pipeline ingestion."""
-        record = self._transition(approval_id, actor, notes, approved=True)
+    def transition_approve(
+        self,
+        approval_id: str,
+        actor: str,
+        notes: str,
+        state: dict[str, object],
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """Approve one pending request and return updated state."""
+        return self._transition(approval_id, actor, notes, approved=True, state=state)
+
+    def transition_reject(
+        self,
+        approval_id: str,
+        actor: str,
+        reason: str,
+        state: dict[str, object],
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """Reject one pending request and return updated state."""
+        return self._transition(approval_id, actor, reason, approved=False, state=state)
+
+    def build_approval_event(
+        self,
+        record: dict[str, Any],
+        actor: str,
+        notes: str,
+    ) -> dict[str, Any]:
+        """Build the simulator event emitted when an approval is granted in v0."""
+        approved_plan = record.get("plan")
+        plan_metadata = approved_plan.get("metadata", {}) if isinstance(approved_plan, dict) else {}
+        projected_cost = float(
+            plan_metadata.get("projected_cost", record.get("projected_cost", 0.0))
+        )
+        purchase_id = str(
+            plan_metadata.get("purchase_id")
+            or record.get("metadata", {}).get("purchase_id")
+            or f"purchase-{record.get('approval_id', 'unknown')}"
+        )
         return {
-            "event_type": "purchase.approved",
+            "event_type": "purchase.completed",
             "source": "os.control_plane",
             "payload": {
                 "domain": "os.robotics",
-                "tags": ["approval", "purchase"],
-                "approval_id": approval_id,
+                "tags": ["purchase", "completed"],
+                "approval_id": record["approval_id"],
                 "decision_id": record["decision_id"],
                 "actor": actor,
                 "notes": notes,
-                "approved_plan": record["plan"],
+                "purchase_id": purchase_id,
+                "total_cost": projected_cost,
+                "approved_plan": approved_plan,
             },
         }
 
-    def reject(self, approval_id: str, actor: str, reason: str) -> dict[str, Any]:
-        """Mark approval rejected and return event payload for pipeline ingestion."""
-        record = self._transition(approval_id, actor, reason, approved=False)
+    def build_rejection_event(
+        self,
+        record: dict[str, Any],
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Build event emitted when an approval is rejected."""
         return {
             "event_type": "purchase.rejected",
             "source": "os.control_plane",
             "payload": {
                 "domain": "os.robotics",
                 "tags": ["approval", "purchase"],
-                "approval_id": approval_id,
+                "approval_id": record["approval_id"],
                 "decision_id": record["decision_id"],
                 "actor": actor,
                 "reason": reason,
             },
         }
 
-    def list_pending(self) -> list[dict[str, Any]]:
-        state = self._sm.load_state()
-        os_state = state.get("pce_os")
-        if not isinstance(os_state, dict):
-            return []
-        pending = os_state.get(_PENDING_APPROVALS_SLICE)
-        if not isinstance(pending, list):
-            return []
+
+    def get_approval(self, state: dict[str, object], approval_id: str) -> dict[str, Any]:
+        """Return one approval record by id."""
+        for item in self._list_all_approvals(state):
+            if item.get("approval_id") == approval_id:
+                return item
+        raise ValueError(f"Approval '{approval_id}' not found")
+
+    def list_pending(self, state: dict[str, object]) -> list[dict[str, Any]]:
+        """List pending approvals from an in-memory state snapshot."""
         return [
             item
-            for item in pending
+            for item in self._list_all_approvals(state)
             if isinstance(item, dict) and item.get("status") == "pending"
         ]
 
@@ -127,14 +168,9 @@ class ApprovalGate:
         actor: str,
         summary: str,
         approved: bool,
-    ) -> dict[str, Any]:
-        state = self._sm.load_state()
-        os_state = state.get("pce_os")
-        if not isinstance(os_state, dict):
-            raise ValueError("No pending approvals found")
-        approvals = os_state.get(_PENDING_APPROVALS_SLICE)
-        if not isinstance(approvals, list):
-            raise ValueError("No pending approvals found")
+        state: dict[str, object],
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        approvals = self._list_all_approvals(state)
 
         for item in approvals:
             if isinstance(item, dict) and item.get("approval_id") == approval_id:
@@ -142,21 +178,38 @@ class ApprovalGate:
                 item["resolved_at"] = datetime.now(UTC).isoformat()
                 item["actor"] = actor
                 item["summary"] = summary
-                self._save_all(approvals)
-                return item
+                next_state = self._write_approvals(state, approvals)
+                logger.info(
+                    "approval_resolved approval_id=%s decision_id=%s status=%s",
+                    approval_id,
+                    item.get("decision_id"),
+                    item["status"],
+                )
+                return item, next_state
         raise ValueError(f"Approval '{approval_id}' not found")
 
-    def _save_pending(self, pending: list[dict[str, Any]]) -> None:
-        self._save_all(pending)
-
-    def _save_all(self, approvals: list[dict[str, Any]]) -> None:
-        state = self._sm.load_state()
+    @staticmethod
+    def _list_all_approvals(state: dict[str, object]) -> list[dict[str, Any]]:
         os_state = state.get("pce_os")
+        if not isinstance(os_state, dict):
+            return []
+        pending = os_state.get(_PENDING_APPROVALS_SLICE)
+        if not isinstance(pending, list):
+            return []
+        return [item for item in pending if isinstance(item, dict)]
+
+    @staticmethod
+    def _write_approvals(
+        state: dict[str, object],
+        approvals: list[dict[str, Any]],
+    ) -> dict[str, object]:
+        next_state = deepcopy(state)
+        os_state = next_state.get("pce_os")
         if not isinstance(os_state, dict):
             os_state = {}
         os_state[_PENDING_APPROVALS_SLICE] = approvals
-        state["pce_os"] = os_state
-        self._sm.save_state(state)
+        next_state["pce_os"] = os_state
+        return next_state
 
     @staticmethod
     def _read_twin(state: dict[str, object]) -> dict[str, Any]:

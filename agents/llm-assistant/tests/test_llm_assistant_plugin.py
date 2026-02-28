@@ -1,6 +1,13 @@
+from api.main import app
 from fastapi.testclient import TestClient
 
-from api.main import app, assistant_client, assistant_storage, assistant_value_model
+
+def _deps():
+    return (
+        app.state.assistant_client,
+        app.state.assistant_storage,
+        app.state.assistant_value_model,
+    )
 
 
 def _assistant_observation_payload(session_id: str, text: str) -> dict[str, object]:
@@ -18,13 +25,14 @@ def _assistant_observation_payload(session_id: str, text: str) -> dict[str, obje
 
 
 def test_observation_returns_reply_action(monkeypatch) -> None:
-    assistant_storage.clear_all()
+    client_obj, storage, _value_model = _deps()
+    storage.clear_all()
 
     def mock_reply(*args, **kwargs) -> str:
         _ = (args, kwargs)
         return "hello"
 
-    monkeypatch.setattr(assistant_client, "generate_reply_sync", mock_reply)
+    monkeypatch.setattr(client_obj, "generate_reply_sync", mock_reply)
     client = TestClient(app)
 
     response = client.post(
@@ -46,16 +54,17 @@ def test_observation_returns_reply_action(monkeypatch) -> None:
 
 
 def test_override_deterministico(monkeypatch) -> None:
-    assistant_storage.clear_all()
+    client_obj, storage, value_model = _deps()
+    storage.clear_all()
 
     def mock_reply(*args, **kwargs) -> str:
         _ = (args, kwargs)
         return "resposta segura"
 
-    monkeypatch.setattr(assistant_client, "generate_reply_sync", mock_reply)
-    monkeypatch.setattr(assistant_value_model, "evaluate", lambda event, state: 0.4)
+    monkeypatch.setattr(client_obj, "generate_reply_sync", mock_reply)
+    monkeypatch.setattr(value_model, "evaluate", lambda event, state: 0.4)
     monkeypatch.setattr(
-        assistant_value_model,
+        value_model,
         "components",
         lambda event, state: {"relevance": 0.4, "safety": 0.9, "clarity": 0.9},
     )
@@ -74,13 +83,14 @@ def test_override_deterministico(monkeypatch) -> None:
 
 
 def test_feedback_updates_policy(monkeypatch) -> None:
-    assistant_storage.clear_all()
+    client_obj, storage, _value_model = _deps()
+    storage.clear_all()
 
     def mock_reply(*args, **kwargs) -> str:
         _ = (args, kwargs)
         return "primeira resposta"
 
-    monkeypatch.setattr(assistant_client, "generate_reply_sync", mock_reply)
+    monkeypatch.setattr(client_obj, "generate_reply_sync", mock_reply)
     client = TestClient(app)
 
     response_observation = client.post(
@@ -89,7 +99,7 @@ def test_feedback_updates_policy(monkeypatch) -> None:
     )
     assert response_observation.status_code == 200
 
-    policy_before = assistant_storage.get_policy_state()
+    policy_before = storage.get_policy_state()
     epsilon_before = float(policy_before["epsilon"])
 
     feedback_payload = {
@@ -106,8 +116,8 @@ def test_feedback_updates_policy(monkeypatch) -> None:
     response_feedback = client.post("/events", json=feedback_payload)
     assert response_feedback.status_code == 200
 
-    policy_after = assistant_storage.get_policy_state()
-    metrics_after = assistant_storage.get_metrics()
+    policy_after = storage.get_policy_state()
+    metrics_after = storage.get_metrics()
 
     assert policy_after["feedback_count"] >= 1
     assert float(policy_after["epsilon"]) < epsilon_before
@@ -115,7 +125,8 @@ def test_feedback_updates_policy(monkeypatch) -> None:
 
 
 def test_feedback_negativo_salva_avoid_e_entra_no_prompt(monkeypatch) -> None:
-    assistant_storage.clear_all()
+    client_obj, storage, _value_model = _deps()
+    storage.clear_all()
     captured_messages: list[list[dict[str, str]]] = []
 
     def mock_reply(messages, **kwargs) -> str:
@@ -123,7 +134,7 @@ def test_feedback_negativo_salva_avoid_e_entra_no_prompt(monkeypatch) -> None:
         captured_messages.append(messages)
         return "ok"
 
-    monkeypatch.setattr(assistant_client, "generate_reply_sync", mock_reply)
+    monkeypatch.setattr(client_obj, "generate_reply_sync", mock_reply)
     client = TestClient(app)
 
     first_obs = client.post(
@@ -162,16 +173,17 @@ def test_feedback_negativo_salva_avoid_e_entra_no_prompt(monkeypatch) -> None:
 
 
 def test_pending_delete_seguro_por_sessao() -> None:
-    assistant_storage.clear_all()
+    _client_obj, storage, _value_model = _deps()
+    storage.clear_all()
 
-    assistant_storage.set_pending_feedback("sessao-a", {"profile_id": "P0"})
-    assistant_storage.set_pending_feedback("sessao-b", {"profile_id": "P1"})
+    storage.set_pending_feedback("sessao-a", {"profile_id": "P0"})
+    storage.set_pending_feedback("sessao-b", {"profile_id": "P1"})
 
-    popped = assistant_storage.pop_pending_feedback("sessao-a")
+    popped = storage.pop_pending_feedback("sessao-a")
     assert popped is not None
 
-    remaining = assistant_storage._state_manager.plugin_list_prefix(
-        assistant_storage.namespace,
+    remaining = storage._state_manager.plugin_list_prefix(
+        storage.namespace,
         "pending:",
     )
     keys = [key for key, _value in remaining]
@@ -180,13 +192,14 @@ def test_pending_delete_seguro_por_sessao() -> None:
 
 
 def test_clear_memory_endpoint(monkeypatch) -> None:
-    assistant_storage.clear_all()
+    client_obj, storage, _value_model = _deps()
+    storage.clear_all()
 
     def mock_reply(*args, **kwargs) -> str:
         _ = (args, kwargs)
         return "memória temporária"
 
-    monkeypatch.setattr(assistant_client, "generate_reply_sync", mock_reply)
+    monkeypatch.setattr(client_obj, "generate_reply_sync", mock_reply)
     client = TestClient(app)
 
     response = client.post(
@@ -197,12 +210,12 @@ def test_clear_memory_endpoint(monkeypatch) -> None:
     )
     assert response.status_code == 200
 
-    assert assistant_storage.get_session_memory("s-clear")["last_messages"]
+    assert storage.get_session_memory("s-clear")["last_messages"]
     clear_response = client.post("/agents/assistant/control/clear_memory")
     assert clear_response.status_code == 200
 
-    memory_after = assistant_storage.get_session_memory("s-clear")
-    policy_after = assistant_storage.get_policy_state()
+    memory_after = storage.get_session_memory("s-clear")
+    policy_after = storage.get_policy_state()
 
     assert memory_after["last_messages"] == []
     assert float(policy_after["epsilon"]) == 0.6

@@ -6,7 +6,6 @@ from pce.core.plugins import AdaptationPlugin, DecisionPlugin, ValueModelPlugin
 from pce.core.types import ActionPlan, ExecutionResult, PCEEvent
 
 from pce_os.models import RobotProjectState
-from pce_os.twin_store import RobotTwinStore
 
 
 class OSRoboticsValueModelPlugin(ValueModelPlugin):
@@ -48,9 +47,6 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
 
     name = "os.robotics.decision"
 
-    def __init__(self, twin_store: RobotTwinStore) -> None:
-        self._twin_store = twin_store
-
     def match(self, event: PCEEvent, state: dict[str, object]) -> bool:
         _ = state
         return str(event.payload.get("domain")) == "os.robotics"
@@ -62,11 +58,10 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
         value_score: float,
         cci: float,
     ) -> ActionPlan:
-        twin_state = self._twin_store.apply_event(
-            event.event_type,
-            event.payload,
-            {"event_id": event.event_id},
-        )
+        twin_state = self._twin(state)
+        projected_cost = self._projected_cost(event, twin_state)
+        projected_risk = str(event.payload.get("risk_level", twin_state.risk_level))
+
         explain = {
             "value_dimensions": {
                 "value_score": value_score,
@@ -78,6 +73,11 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
                 "total": twin_state.budget_total,
                 "remaining": twin_state.budget_remaining,
             },
+            "event_snapshot": {
+                "event_type": event.event_type,
+                "payload": event.payload,
+            },
+            "twin_snapshot": twin_state.model_dump(mode="json"),
             "gate_required": event.event_type in {"purchase.requested"},
         }
 
@@ -87,7 +87,7 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
                 rationale="Projeto definido; gerar BOM inicial e baseline de custo/risco.",
                 priority=2,
                 metadata={
-                    "projected_cost": twin_state.cost_projection.projected_total_cost,
+                    "projected_cost": projected_cost,
                     "risk_level": twin_state.risk_level,
                     "explain": explain,
                 },
@@ -98,7 +98,7 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
                 rationale="Componente candidato adicionado; recalcular projeções.",
                 priority=3,
                 metadata={
-                    "projected_cost": twin_state.cost_projection.projected_total_cost,
+                    "projected_cost": projected_cost,
                     "risk_level": twin_state.risk_level,
                     "explain": explain,
                 },
@@ -109,22 +109,19 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
                 rationale="Compra solicitada; aguardando gate humano obrigatório.",
                 priority=1,
                 metadata={
-                    "projected_cost": float(event.payload.get("projected_cost", 0.0)),
-                    "risk_level": str(event.payload.get("risk_level", twin_state.risk_level)),
+                    "projected_cost": projected_cost,
+                    "risk_level": projected_risk,
+                    "purchase_id": event.payload.get("purchase_id"),
                     "explain": explain,
                 },
             )
-        if event.event_type == "purchase.approved":
+        if event.event_type == "purchase.completed":
             return ActionPlan(
                 action_type="os.record_purchase",
-                rationale="Compra aprovada; registrar execução e atualizar saldo.",
+                rationale="Compra concluída; registrar execução e atualizar saldo.",
                 priority=1,
                 metadata={
-                    "projected_cost": float(
-                        event.payload.get("approved_plan", {})
-                        .get("metadata", {})
-                        .get("projected_cost", 0.0)
-                    ),
+                    "projected_cost": projected_cost,
                     "risk_level": twin_state.risk_level,
                     "explain": explain,
                 },
@@ -135,7 +132,7 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
                 rationale="Resultado de teste recebido; atualizar risco e custo projetado.",
                 priority=2,
                 metadata={
-                    "projected_cost": twin_state.cost_projection.projected_total_cost,
+                    "projected_cost": projected_cost,
                     "risk_level": twin_state.risk_level,
                     "explain": explain,
                 },
@@ -146,11 +143,24 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
             rationale="Evento OS processado com atualização incremental do plano.",
             priority=4,
             metadata={
-                "projected_cost": twin_state.cost_projection.projected_total_cost,
+                "projected_cost": projected_cost,
                 "risk_level": twin_state.risk_level,
                 "explain": explain,
             },
         )
+
+    @staticmethod
+    def _twin(state: dict[str, object]) -> RobotProjectState:
+        os_state = state.get("pce_os")
+        if isinstance(os_state, dict) and isinstance(os_state.get("robotics_twin"), dict):
+            return RobotProjectState.model_validate(os_state["robotics_twin"])
+        return RobotProjectState()
+
+    @staticmethod
+    def _projected_cost(event: PCEEvent, twin: RobotProjectState) -> float:
+        if "projected_cost" in event.payload:
+            return float(event.payload.get("projected_cost", 0.0))
+        return float(twin.cost_projection.projected_total_cost)
 
 
 class OSRoboticsAdaptationPlugin(AdaptationPlugin):

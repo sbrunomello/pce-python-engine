@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
 from typing import Any
 
 from pce.sm.manager import StateManager
@@ -18,22 +17,20 @@ from pce_os.models import (
 
 _OS_SLICE = "pce_os"
 _TWIN_SLICE = "robotics_twin"
+_UNKNOWN_EVENT_AT = "unknown"
 
 
 class RobotTwinStore:
-    """Read/write helper for the robotics twin state slice."""
-
-    def __init__(self, state: RobotProjectState | None = None) -> None:
-        self._state = state or RobotProjectState()
-
-    def current_state(self) -> RobotProjectState:
-        """Return in-memory twin state."""
-        return self._state
+    """Stateless helpers for reading/writing and evolving robotics twin state."""
 
     @staticmethod
     def load(sm: StateManager) -> RobotProjectState:
-        """Load twin state from the global state store, creating defaults when missing."""
-        state = sm.load_state()
+        """Load twin state from persistent state manager."""
+        return RobotTwinStore.from_state(sm.load_state())
+
+    @staticmethod
+    def from_state(state: dict[str, object]) -> RobotProjectState:
+        """Load twin state from an in-memory state snapshot."""
         os_payload = state.get(_OS_SLICE)
         if not isinstance(os_payload, dict):
             return RobotProjectState()
@@ -43,30 +40,35 @@ class RobotTwinStore:
         return RobotProjectState.model_validate(twin_payload)
 
     @staticmethod
-    def save(sm: StateManager, state: RobotProjectState) -> None:
-        """Persist twin state in the fixed PCE-OS state slice."""
-        global_state = sm.load_state()
-        os_payload = global_state.get(_OS_SLICE)
+    def write_into_state_slice(
+        state: dict[str, object],
+        twin: RobotProjectState,
+    ) -> dict[str, object]:
+        """Return a copy of ``state`` with the robotics twin persisted into ``pce_os``."""
+        next_state = deepcopy(state)
+        os_payload = next_state.get(_OS_SLICE)
         if not isinstance(os_payload, dict):
             os_payload = {}
-        os_payload[_TWIN_SLICE] = state.model_dump(mode="json")
-        global_state[_OS_SLICE] = os_payload
-        sm.save_state(global_state)
+        os_payload[_TWIN_SLICE] = twin.model_dump(mode="json")
+        next_state[_OS_SLICE] = os_payload
+        return next_state
 
+    @staticmethod
     def apply_event(
-        self,
+        twin: RobotProjectState,
         event_type: str,
         payload: dict[str, Any],
         metadata: dict[str, Any] | None = None,
     ) -> RobotProjectState:
-        """Apply one domain event deterministically and return updated state."""
+        """Apply one domain event deterministically and return updated twin state."""
         metadata = metadata or {}
-        next_state = self._state.model_copy(deep=True)
+        next_state = twin.model_copy(deep=True)
+
         event_record: dict[str, object] = {
             "event_type": event_type,
             "payload": deepcopy(payload),
             "metadata": deepcopy(metadata),
-            "at": str(metadata.get("at", datetime.now(UTC).isoformat())),
+            "at": RobotTwinStore._resolve_event_at(metadata),
         }
 
         if event_type == "project.goal.defined":
@@ -82,12 +84,12 @@ class RobotTwinStore:
                 for comp in next_state.components
                 if comp.component_id != component.component_id
             ] + [component]
-            next_state.cost_projection = self._project_cost(next_state)
+            next_state.cost_projection = RobotTwinStore._project_cost(next_state)
         elif event_type == "purchase.completed":
             spent = float(payload.get("total_cost", 0.0))
             next_state.budget_remaining -= spent
             next_state.purchase_history.append({"status": "completed", **deepcopy(payload)})
-            next_state.cost_projection = self._project_cost(next_state)
+            next_state.cost_projection = RobotTwinStore._project_cost(next_state)
         elif event_type == "part.received":
             component_id = str(payload.get("component_id", ""))
             next_state.components = [
@@ -111,8 +113,12 @@ class RobotTwinStore:
             next_state.risk_level = str(payload.get("risk_level", "HIGH"))
 
         next_state.audit_trail.append(event_record)
-        self._state = next_state
         return next_state
+
+    @staticmethod
+    def _resolve_event_at(metadata: dict[str, Any]) -> str:
+        event_at = metadata.get("at") or metadata.get("event_at")
+        return str(event_at) if event_at is not None else _UNKNOWN_EVENT_AT
 
     @staticmethod
     def _project_cost(state: RobotProjectState) -> CostProjection:
