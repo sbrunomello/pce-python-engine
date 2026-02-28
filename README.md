@@ -119,7 +119,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 pip install -e pce-core -e pce-os -e agents/llm-assistant -e agents/rover
-uvicorn pce_api.main:app --reload --port 8080
+uvicorn api.main:app --reload --port 8080
 ```
 
 ### Testes no Windows
@@ -162,7 +162,7 @@ Saída esperada: linhas com `event`, `action`, `cci_before`, `cci_after`, `value
 ### 5.3 Subir API
 
 ```bash
-uvicorn pce_api.main:app --reload
+uvicorn api.main:app --reload
 ```
 
 Endpoints principais:
@@ -177,9 +177,13 @@ Exemplo:
 curl -X POST http://127.0.0.1:8000/events \
   -H "Content-Type: application/json" \
   -d '{
-    "event_type": "market_signal",
-    "source": "risk_feed",
-    "payload": {"volatility": 0.73, "drawdown": 0.18}
+    "event_type": "project.goal.defined",
+    "source": "pm",
+    "payload": {
+      "domain": "os.robotics",
+      "tags": ["goal"],
+      "goal": "launch v1"
+    }
   }'
 ```
 
