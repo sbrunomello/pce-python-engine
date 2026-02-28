@@ -23,6 +23,26 @@ O PCE-OS v0 implementa um **control-plane de robótica com aprovação humana ob
 4. Se o orçamento for insuficiente no `approve`, o sistema rejeita a aprovação com `409 insufficient_budget_for_purchase`.
 5. `reject` gera `purchase.rejected` (sem baixa de budget).
 
+## Configuração única do PCE-OS
+
+O PCE-OS agora usa **um único arquivo de configuração** em `pce-os/config/os_config.json`.
+
+- Todos os valores de configuração do domínio OS ficam nesse arquivo.
+- O campo `openrouter.api_key` é entregue vazio por padrão e deve ser preenchido manualmente no ambiente de execução seguro.
+- O restante dos valores já vem com defaults produtivos para execução local.
+
+Exemplo:
+
+```json
+{
+  "openrouter": {
+    "api_key": "",
+    "model": "openai/gpt-4o-mini",
+    "base_url": "https://openrouter.ai/api/v1/chat/completions"
+  }
+}
+```
+
 ## Demo local
 
 ### 1) Enviar cenário OS

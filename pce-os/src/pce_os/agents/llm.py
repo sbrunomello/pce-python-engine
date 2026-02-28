@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+
+from pce_os.config import load_os_config
 
 
 class LLMClient(ABC):
@@ -29,9 +30,11 @@ class OpenRouterLLMClient(LLMClient):
     """Best-effort OpenRouter adapter stub (optional, retries=0)."""
 
     def __init__(self) -> None:
-        self.api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
-        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+        # Centralized OS config keeps runtime deterministic across environments.
+        openrouter = load_os_config().openrouter
+        self.api_key = openrouter.api_key
+        self.model = openrouter.model
+        self.base_url = openrouter.base_url
 
     def complete(self, prompt: str, *, timeout_s: float = 3.0) -> str:
         if not self.api_key:
