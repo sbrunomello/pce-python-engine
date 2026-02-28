@@ -6,8 +6,8 @@ import json
 
 from pce.core.plugins import AdaptationPlugin
 from pce.core.types import ExecutionResult, PCEEvent
-from pce.plugins.robotics.rl import ROBOT_ACTIONS, build_state_key, q_learning_update
-from pce.plugins.robotics.storage import RoboticsStorage
+from rover_plugins.rl import ROBOT_ACTIONS, build_state_key, q_learning_update
+from rover_plugins.storage import RoboticsStorage
 
 
 class RoboticsAdaptationPlugin(AdaptationPlugin):

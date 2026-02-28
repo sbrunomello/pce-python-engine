@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pce.core.types import PCEEvent
-from pce.plugins.llm_assistant.client import OpenRouterError
-from pce.plugins.llm_assistant.decision import AssistantDecisionPlugin
-from pce.plugins.llm_assistant.value_model import AssistantValueModelPlugin
+from llm_assistant.client import OpenRouterError
+from llm_assistant.decision import AssistantDecisionPlugin
+from llm_assistant.value_model import AssistantValueModelPlugin
 
 
 class _StorageStub:

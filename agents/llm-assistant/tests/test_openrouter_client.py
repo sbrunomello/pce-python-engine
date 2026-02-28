@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from pce.plugins.llm_assistant.client import OpenRouterClient, OpenRouterError
+from llm_assistant.client import OpenRouterClient, OpenRouterError
 
 
 def test_generate_reply_includes_status_and_body_excerpt(monkeypatch) -> None:

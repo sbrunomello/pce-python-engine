@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pce.plugins.robotics.rl import DEFAULT_HYPERPARAMS, ROBOT_ACTIONS
+from rover_plugins.rl import DEFAULT_HYPERPARAMS, ROBOT_ACTIONS
 from pce.sm.manager import StateManager
 
 

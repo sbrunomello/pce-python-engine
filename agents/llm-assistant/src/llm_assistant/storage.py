@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from pce.plugins.llm_assistant.policy import PolicyState, ProfileStats, default_policy_state
+from llm_assistant.policy import PolicyState, ProfileStats, default_policy_state
 from pce.sm.manager import StateManager
 
 

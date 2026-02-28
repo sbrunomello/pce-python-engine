@@ -10,10 +10,10 @@ from typing import Any
 
 from pce.core.plugins import DecisionPlugin
 from pce.core.types import ActionPlan, PCEEvent
-from pce.plugins.llm_assistant.client import OpenRouterError, OpenRouterMissingAPIKeyError
-from pce.plugins.llm_assistant.policy import apply_profile_override, choose_profile
-from pce.plugins.llm_assistant.storage import AssistantStorage
-from pce.plugins.llm_assistant.value_model import AssistantValueModelPlugin
+from llm_assistant.client import OpenRouterError, OpenRouterMissingAPIKeyError
+from llm_assistant.policy import apply_profile_override, choose_profile
+from llm_assistant.storage import AssistantStorage
+from llm_assistant.value_model import AssistantValueModelPlugin
 
 
 class AssistantDecisionPlugin(DecisionPlugin):

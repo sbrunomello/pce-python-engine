@@ -6,8 +6,8 @@ import json
 
 from pce.core.plugins import AdaptationPlugin
 from pce.core.types import ExecutionResult, PCEEvent
-from pce.plugins.llm_assistant.policy import reward_from_feedback, update_policy
-from pce.plugins.llm_assistant.storage import AssistantStorage
+from llm_assistant.policy import reward_from_feedback, update_policy
+from llm_assistant.storage import AssistantStorage
 
 
 class AssistantAdaptationPlugin(AdaptationPlugin):
