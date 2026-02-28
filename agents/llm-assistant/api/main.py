@@ -18,15 +18,15 @@ from pce.core.types import ExecutionResult
 from pce.de.engine import DecisionEngine
 from pce.epl.processor import EventProcessingLayer
 from pce.isi.integrator import InternalStateIntegrator
-from pce.plugins.llm_assistant import (
+from llm_assistant import (
     AssistantAdaptationPlugin,
     AssistantDecisionPlugin,
     AssistantStorage,
     AssistantValueModelPlugin,
     OpenRouterClient,
 )
-from pce.plugins.llm_assistant.config import load_openrouter_credentials
-from pce.plugins.robotics import (
+from llm_assistant.config import load_openrouter_credentials
+from rover_plugins import (
     RoboticsAdaptationPlugin,
     RoboticsDecisionPlugin,
     RoboticsStorage,

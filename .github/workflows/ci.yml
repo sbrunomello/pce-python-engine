@@ -15,13 +15,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pip install -e ./pce-core[dev]
+          pip install -e ./agents/rover
+          pip install -e ./agents/llm-assistant
       - name: Lint
         run: ruff check .
       - name: Type check
-        run: mypy src
-      - name: Tests
-        run: pytest -q
+        run: mypy pce-core/src agents/rover/src agents/llm-assistant/src
+      - name: Core tests
+        run: pytest -q pce-core/tests
+      - name: Rover tests
+        run: pytest -q agents/rover/tests
+      - name: LLM assistant tests
+        run: pytest -q agents/llm-assistant/tests
       - name: Verify no binaries
         run: ./tools/scripts/verify-no-binaries.sh
       - name: Verify no secrets

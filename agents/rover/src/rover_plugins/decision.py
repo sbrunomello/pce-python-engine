@@ -6,13 +6,13 @@ from typing import Any
 
 from pce.core.plugins import DecisionPlugin
 from pce.core.types import ActionPlan, PCEEvent
-from pce.plugins.robotics.rl import (
+from rover_plugins.rl import (
     ROBOT_ACTIONS,
     action_to_robot_command,
     build_state_key,
     choose_action,
 )
-from pce.plugins.robotics.storage import RoboticsStorage
+from rover_plugins.storage import RoboticsStorage
 
 
 class RoboticsDecisionPlugin(DecisionPlugin):

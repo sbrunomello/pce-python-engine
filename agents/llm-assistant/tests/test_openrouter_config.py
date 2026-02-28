@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from pce.plugins.llm_assistant.config import load_openrouter_credentials
+from llm_assistant.config import load_openrouter_credentials
 
 
 def test_load_openrouter_credentials_from_file(tmp_path) -> None:
