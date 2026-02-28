@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pce.local/schemas/events.os.schema.json",
+  "title": "PCE-OS Events",
+  "type": "object",
+  "required": ["event_type", "source", "payload"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "project.goal.defined",
+        "budget.updated",
+        "part.candidate.added",
+        "purchase.requested",
+        "purchase.approved",
+        "purchase.rejected",
+        "purchase.completed",
+        "part.received",
+        "test.executed",
+        "test.result.recorded",
+        "risk.detected"
+      ]
+    },
+    "source": {"type": "string", "minLength": 1},
+    "payload": {
+      "type": "object",
+      "required": ["domain", "tags"],
+      "properties": {
+        "domain": {"const": "os.robotics"},
+        "tags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

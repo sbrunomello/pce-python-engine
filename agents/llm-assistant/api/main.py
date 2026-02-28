@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-
-from agents.rover import router as rover_router
-from agents.rover.app import runtime as rover_runtime
+from llm_assistant import (
+    AssistantAdaptationPlugin,
+    AssistantDecisionPlugin,
+    AssistantStorage,
+    AssistantValueModelPlugin,
+    OpenRouterClient,
+)
+from llm_assistant.config import load_openrouter_credentials
 from pce.afs.feedback import AdaptiveFeedbackSystem
 from pce.ao.orchestrator import ActionOrchestrator
 from pce.core.cci import CCIMetric
@@ -18,25 +23,29 @@ from pce.core.types import ExecutionResult
 from pce.de.engine import DecisionEngine
 from pce.epl.processor import EventProcessingLayer
 from pce.isi.integrator import InternalStateIntegrator
-from llm_assistant import (
-    AssistantAdaptationPlugin,
-    AssistantDecisionPlugin,
-    AssistantStorage,
-    AssistantValueModelPlugin,
-    OpenRouterClient,
+from pce.sm.manager import StateManager
+from pce.vel.evaluator import ValueEvaluationLayer
+from pce_os import (
+    ApprovalGate,
+    OSRoboticsAdaptationPlugin,
+    OSRoboticsDecisionPlugin,
+    OSRoboticsValueModelPlugin,
+    RobotTwinStore,
 )
-from llm_assistant.config import load_openrouter_credentials
+from pydantic import BaseModel, Field
 from rover_plugins import (
     RoboticsAdaptationPlugin,
     RoboticsDecisionPlugin,
     RoboticsStorage,
     RoboticsValueModelPlugin,
 )
-from pce.sm.manager import StateManager
-from pce.vel.evaluator import ValueEvaluationLayer
+
+from agents.rover import router as rover_router
+from agents.rover.app import runtime as rover_runtime
 
 settings = Settings()
 app = FastAPI(title="PCE API", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 # Composition root: dependencies are instantiated once and kept independent by contracts.
 epl = EventProcessingLayer(settings.event_schema_path)
@@ -51,6 +60,8 @@ cci_metric = CCIMetric()
 plugin_registry = PluginRegistry()
 robotics_storage = RoboticsStorage(sm)
 assistant_storage = AssistantStorage(sm)
+approval_gate = ApprovalGate(sm)
+robot_twin_store = RobotTwinStore(RobotTwinStore.load(sm))
 assistant_value_model = AssistantValueModelPlugin()
 openrouter_credentials = load_openrouter_credentials()
 assistant_client = OpenRouterClient(
@@ -63,11 +74,14 @@ assistant_client = OpenRouterClient(
 )
 plugin_registry.register_value_model(RoboticsValueModelPlugin())
 plugin_registry.register_value_model(assistant_value_model)
+plugin_registry.register_value_model(OSRoboticsValueModelPlugin())
 plugin_registry.register_decision(RoboticsDecisionPlugin(robotics_storage))
+plugin_registry.register_decision(OSRoboticsDecisionPlugin(robot_twin_store))
 plugin_registry.register_decision(
     AssistantDecisionPlugin(assistant_storage, assistant_value_model, assistant_client)
 )
 plugin_registry.register_adaptation(RoboticsAdaptationPlugin(robotics_storage))
+plugin_registry.register_adaptation(OSRoboticsAdaptationPlugin())
 plugin_registry.register_adaptation(AssistantAdaptationPlugin(assistant_storage))
 
 
@@ -79,8 +93,15 @@ class EventIn(BaseModel):
     payload: dict[str, object]
 
 
-@app.post("/events")
-def process_event(event_in: EventIn) -> dict[str, object]:
+class ApprovalDecisionIn(BaseModel):
+    """Control-plane payload for approval transitions."""
+
+    actor: str = Field(min_length=1)
+    notes: str | None = None
+    reason: str | None = None
+
+
+def _run_pipeline(event_in: EventIn) -> dict[str, object]:
     """End-to-end event processing pipeline entrypoint with plugin dispatch."""
     try:
         event = epl.ingest(event_in.model_dump())
@@ -107,11 +128,10 @@ def process_event(event_in: EventIn) -> dict[str, object]:
         cci,
         fallback=de.deliberate,
     )
+
     explain = plan.metadata.get("explain")
     if isinstance(explain, dict):
-        cci_explain = explain.get("cci")
-        if isinstance(cci_explain, dict):
-            cci_explain["components"] = cci_payload
+        explain["cci"] = {"score": cci, "components": cci_payload}
 
     if event.event_type.startswith("feedback."):
         result = ExecutionResult(
@@ -122,9 +142,48 @@ def process_event(event_in: EventIn) -> dict[str, object]:
             metadata={"feedback": event.payload},
         )
     else:
-        result = plugin_registry.execute(plan, fallback=ao.execute)
+        needs_approval, rationale = approval_gate.decide_if_requires_approval(plan, updated_state)
+        if needs_approval and event.event_type != "purchase.approved":
+            pending = approval_gate.enqueue_pending_approval(
+                decision_id=event.event_id,
+                plan=plan,
+                snapshot_state=updated_state,
+                metadata={"event_id": event.event_id, "gate_rationale": rationale},
+            )
+            logger.info(
+                "approval_pending event_id=%s decision_id=%s approval_id=%s",
+                event.event_id,
+                event.event_id,
+                pending["approval_id"],
+            )
+            plan.metadata.setdefault("explain", {})
+            if isinstance(plan.metadata["explain"], dict):
+                plan.metadata["explain"]["gate"] = {
+                    "required": True,
+                    "rationale": rationale,
+                    "approval_id": pending["approval_id"],
+                }
+            result = ExecutionResult(
+                action_type=plan.action_type,
+                success=True,
+                observed_impact=0.0,
+                notes="approval pending",
+                metadata={"approval_pending": True, "approval_id": pending["approval_id"]},
+            )
+        else:
+            result = plugin_registry.execute(plan, fallback=ao.execute)
 
     adapted_state = plugin_registry.adapt(updated_state, event, result, fallback=afs.adapt)
+    latest_state = sm.load_state()
+    latest_os = latest_state.get("pce_os") if isinstance(latest_state, dict) else None
+    if str(event.payload.get("domain")) == "os.robotics":
+        os_payload = adapted_state.get("pce_os")
+        if not isinstance(os_payload, dict):
+            os_payload = {}
+        os_payload["robotics_twin"] = robot_twin_store.current_state().model_dump(mode="json")
+        if isinstance(latest_os, dict) and isinstance(latest_os.get("pending_approvals"), list):
+            os_payload["pending_approvals"] = latest_os["pending_approvals"]
+        adapted_state["pce_os"] = os_payload
     sm.save_state(adapted_state)
 
     violated_values = [] if value_score >= 0.6 else ["long_term_coherence"]
@@ -150,11 +209,7 @@ def process_event(event_in: EventIn) -> dict[str, object]:
         "contradiction_rate": components.contradiction_rate,
         "predictive_accuracy": components.predictive_accuracy,
     }
-    sm.save_cci_snapshot(
-        cci_id=str(uuid4()),
-        cci=cci,
-        metrics=cci_payload,
-    )
+    sm.save_cci_snapshot(cci_id=str(uuid4()), cci=cci, metrics=cci_payload)
 
     action_payload = plan.metadata.get("action_payload", plan.action_type)
     response: dict[str, object] = {
@@ -187,6 +242,12 @@ def process_event(event_in: EventIn) -> dict[str, object]:
     return response
 
 
+@app.post("/events")
+def process_event(event_in: EventIn) -> dict[str, object]:
+    """Public event ingestion endpoint."""
+    return _run_pipeline(event_in)
+
+
 @app.get("/cci")
 def get_cci() -> dict[str, float]:
     """Expose current real-time CCI."""
@@ -198,6 +259,40 @@ def get_cci() -> dict[str, float]:
 def get_state() -> dict[str, object]:
     """Expose persisted cognitive state."""
     return {"state": sm.load_state()}
+
+
+@app.get("/os/robotics/state")
+def get_os_robotics_state() -> dict[str, object]:
+    """Return current robotics digital twin state."""
+    twin = RobotTwinStore.load(sm)
+    return {"robotics_twin": twin.model_dump(mode="json")}
+
+
+@app.get("/os/approvals")
+def get_os_approvals() -> dict[str, object]:
+    """List pending approval requests."""
+    return {"pending": approval_gate.list_pending()}
+
+
+@app.post("/os/approvals/{approval_id}/approve")
+def approve_os_request(approval_id: str, body: ApprovalDecisionIn) -> dict[str, object]:
+    """Approve one pending OS action and route resulting event through pipeline."""
+    try:
+        event_payload = approval_gate.approve(approval_id, body.actor, body.notes or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _run_pipeline(EventIn.model_validate(event_payload))
+
+
+@app.post("/os/approvals/{approval_id}/reject")
+def reject_os_request(approval_id: str, body: ApprovalDecisionIn) -> dict[str, object]:
+    """Reject one pending OS action and route resulting event through pipeline."""
+    reason = body.reason or body.notes or "no reason provided"
+    try:
+        event_payload = approval_gate.reject(approval_id, body.actor, reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _run_pipeline(EventIn.model_validate(event_payload))
 
 
 @app.get("/cci/history")

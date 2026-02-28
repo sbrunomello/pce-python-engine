@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pce.local/schemas/action.os.schema.json",
+  "title": "PCE-OS Actions",
+  "type": "object",
+  "required": ["action_type", "rationale", "priority"],
+  "properties": {
+    "action_type": {
+      "type": "string",
+      "enum": [
+        "os.generate_bom",
+        "os.request_purchase_approval",
+        "os.record_purchase",
+        "os.schedule_test",
+        "os.update_project_plan"
+      ]
+    },
+    "rationale": {"type": "string", "minLength": 1},
+    "priority": {"type": "integer", "minimum": 1, "maximum": 10},
+    "metadata": {"type": "object"}
+  },
+  "additionalProperties": false
+}
