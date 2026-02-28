@@ -3,23 +3,75 @@
   "$id": "https://pce.local/schemas/events.schema.json",
   "title": "PCE Event",
   "type": "object",
-  "required": ["event_type", "source", "payload"],
+  "required": [
+    "event_type",
+    "source",
+    "payload"
+  ],
   "properties": {
-    "event_type": { "type": "string", "minLength": 1 },
-    "source": { "type": "string", "minLength": 1 },
+    "event_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
     "payload": {
       "type": "object",
-      "required": ["domain", "tags"],
+      "required": [
+        "domain",
+        "tags"
+      ],
       "properties": {
-        "domain": { "type": "string", "minLength": 1 },
+        "domain": {
+          "type": "string",
+          "minLength": 1
+        },
         "tags": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "minItems": 1
         }
       },
       "additionalProperties": true
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "domain": {
+                "const": "os.robotics"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "project.goal.defined",
+              "budget.updated",
+              "part.candidate.added",
+              "purchase.requested",
+              "purchase.approved",
+              "purchase.rejected",
+              "purchase.completed",
+              "part.received",
+              "test.executed",
+              "test.result.recorded",
+              "risk.detected"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }
