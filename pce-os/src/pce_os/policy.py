@@ -93,6 +93,29 @@ class ApprovalGate:
         """Reject one pending request and return updated state."""
         return self._transition(approval_id, actor, reason, approved=False, state=state)
 
+    def transition_override(
+        self,
+        approval_id: str,
+        actor: str,
+        notes: str,
+        state: dict[str, object],
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """Force resolve one pending request as overridden."""
+        approvals = self._list_all_approvals(state)
+        for item in approvals:
+            if isinstance(item, dict) and item.get("approval_id") == approval_id:
+                item["status"] = "overridden"
+                item["resolved_at"] = datetime.now(UTC).isoformat()
+                item["actor"] = actor
+                item["summary"] = notes
+                metadata = item.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["override"] = True
+                item["metadata"] = metadata
+                return item, self._write_approvals(state, approvals)
+        raise ValueError(f"Approval '{approval_id}' not found")
+
     def build_approval_event(
         self,
         record: dict[str, Any],
@@ -146,7 +169,6 @@ class ApprovalGate:
             },
         }
 
-
     def get_approval(self, state: dict[str, object], approval_id: str) -> dict[str, Any]:
         """Return one approval record by id."""
         for item in self._list_all_approvals(state):
@@ -161,6 +183,10 @@ class ApprovalGate:
             for item in self._list_all_approvals(state)
             if isinstance(item, dict) and item.get("status") == "pending"
         ]
+
+    def list_all(self, state: dict[str, object]) -> list[dict[str, Any]]:
+        """List all approvals, including resolved entries."""
+        return self._list_all_approvals(state)
 
     def _transition(
         self,

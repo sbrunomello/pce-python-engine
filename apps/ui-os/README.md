@@ -1,40 +1,47 @@
-# PCE-OS UI
+# PCE-OS UI (Control Room)
 
-Cockpit front-end para o domínio OS (robótica), cobrindo MVP de:
+Interface web para monitorar o PCE-OS multi-agente em tempo real:
 
-- Overview operacional
-- Gestão de approvals (approve/reject)
-- Visualização do Digital Twin
+- Overview de KPIs e estado de policy
+- Live Feed com SSE + fallback para polling
+- Approvals com approve/reject/override
+- Twin snapshot + auditoria
+- Agents status cards
 
 ## Pré-requisitos
 
 - Node.js 20+
-- API FastAPI em execução local
+- Backend FastAPI local
 
-## Rodando em desenvolvimento
+## Rodando backend + UI
 
-1. Suba a API:
+1. Backend API (porta 8080):
 
 ```bash
 uvicorn pce_api.main:app --reload --port 8080
 ```
 
-2. Rode a UI:
+2. UI:
 
 ```bash
+cd apps/ui-os
 npm i
 npm run dev
 ```
 
-## Configuração de API
+## Variáveis de ambiente
 
-A UI chama sempre `/api/...` no cliente e usa proxy do Vite para apontar para o backend.
+### UI
 
-- Variável suportada: `VITE_API_BASE_URL`
-- Default: `http://127.0.0.1:8080`
+- `VITE_API_BASE_URL` (default `http://127.0.0.1:8080`)
 
 Exemplo:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8080 npm run dev
 ```
+
+### Backend
+
+- SSE (`GET /v1/stream/os`) já está habilitado por padrão no servidor.
+- LLM de agentes continua **server-side** (não exposto no frontend).

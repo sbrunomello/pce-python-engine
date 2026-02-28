@@ -9,6 +9,8 @@ const TwinSchema = z.object({
   components: z.array(z.record(z.unknown())).default([]),
   purchase_history: z.array(z.record(z.unknown())).default([]),
   audit_trail: z.array(z.record(z.unknown())).default([]),
+  tests: z.array(z.record(z.unknown())).default([]),
+  simulations: z.array(z.record(z.unknown())).default([]),
 });
 
 const ApprovalSchema = z.object({
@@ -21,76 +23,77 @@ const ApprovalSchema = z.object({
   rationale: z.string().optional(),
   created_at: z.string().optional(),
   metadata: z.record(z.unknown()).optional(),
+  summary: z.string().optional(),
 });
 
-const StateSchema = z.object({
-  state: z.record(z.unknown()),
-});
-
-const CciSchema = z.object({
-  cci: z.number(),
-});
-
-const CciHistorySchema = z.object({
-  history: z.array(z.record(z.unknown())),
-});
-
-const RoboticsStateResponseSchema = z.object({
-  robotics_twin: TwinSchema,
+const ControlStateSchema = z.object({
+  twin_snapshot: TwinSchema,
+  os_metrics: z.record(z.unknown()),
+  policy_state: z.record(z.unknown()),
+  last_n_audit_trail: z.array(z.record(z.unknown())),
 });
 
 const ApprovalsResponseSchema = z.object({
+  items: z.array(ApprovalSchema),
   pending: z.array(ApprovalSchema),
+});
+
+const TranscriptItemSchema = z.object({
+  cursor: z.number(),
+  ts: z.string(),
+  kind: z.string(),
+  agent: z.string().optional(),
+  payload: z.record(z.unknown()),
+  correlation_id: z.string(),
+  decision_id: z.string().optional(),
+});
+
+const TranscriptResponseSchema = z.object({
+  cursor: z.number(),
+  items: z.array(TranscriptItemSchema),
 });
 
 export type RoboticsTwin = z.infer<typeof TwinSchema>;
 export type Approval = z.infer<typeof ApprovalSchema>;
+export type TranscriptItem = z.infer<typeof TranscriptItemSchema>;
 
-export async function fetchRoboticsState(signal?: AbortSignal): Promise<RoboticsTwin> {
-  const response = RoboticsStateResponseSchema.parse(
-    await apiRequest('/os/robotics/state', { signal }),
-  );
-  return response.robotics_twin;
+export async function fetchControlState(signal?: AbortSignal) {
+  return ControlStateSchema.parse(await apiRequest('/v1/os/state', { signal }));
 }
 
 export async function fetchPendingApprovals(signal?: AbortSignal): Promise<Approval[]> {
-  const response = ApprovalsResponseSchema.parse(await apiRequest('/os/approvals', { signal }));
+  const response = ApprovalsResponseSchema.parse(await apiRequest('/v1/os/approvals', { signal }));
   return response.pending;
 }
 
-export async function approveApproval(
-  approvalId: string,
-  actor: string,
-  notes: string,
-): Promise<void> {
-  await apiRequest(`/os/approvals/${approvalId}/approve`, {
-    method: 'POST',
-    body: { actor, notes },
-  });
+export async function fetchAllApprovals(signal?: AbortSignal): Promise<Approval[]> {
+  const response = ApprovalsResponseSchema.parse(await apiRequest('/v1/os/approvals', { signal }));
+  return response.items;
 }
 
-export async function rejectApproval(
-  approvalId: string,
-  actor: string,
-  reason: string,
-): Promise<void> {
-  await apiRequest(`/os/approvals/${approvalId}/reject`, {
-    method: 'POST',
-    body: { actor, reason },
-  });
+export async function approveApproval(approvalId: string, actor: string, notes: string): Promise<void> {
+  await apiRequest(`/v1/os/approvals/${approvalId}/approve`, { method: 'POST', body: { actor, notes } });
 }
 
-export async function fetchState(signal?: AbortSignal): Promise<Record<string, unknown>> {
-  const response = StateSchema.parse(await apiRequest('/state', { signal }));
-  return response.state;
+export async function rejectApproval(approvalId: string, actor: string, reason: string): Promise<void> {
+  await apiRequest(`/v1/os/approvals/${approvalId}/reject`, { method: 'POST', body: { actor, reason } });
 }
 
-export async function fetchCci(signal?: AbortSignal): Promise<number> {
-  const response = CciSchema.parse(await apiRequest('/cci', { signal }));
-  return response.cci;
+export async function overrideApproval(approvalId: string, actor: string, notes: string): Promise<void> {
+  await apiRequest(`/v1/os/approvals/${approvalId}/override`, { method: 'POST', body: { actor, notes } });
 }
 
-export async function fetchCciHistory(signal?: AbortSignal): Promise<Record<string, unknown>[]> {
-  const response = CciHistorySchema.parse(await apiRequest('/cci/history', { signal }));
-  return response.history;
+export async function fetchTranscriptSince(since: number, signal?: AbortSignal): Promise<{ cursor: number; items: TranscriptItem[] }> {
+  return TranscriptResponseSchema.parse(await apiRequest(`/v1/os/agents/transcript?since=${since}`, { signal }));
+}
+
+const demoEvents = [
+  { event_type: 'project.goal.defined', source: 'ui-demo', payload: { domain: 'os.robotics', correlation_id: 'demo-control-room', goal: 'Build rover v2' } },
+  { event_type: 'part.candidate.added', source: 'ui-demo', payload: { domain: 'os.robotics', correlation_id: 'demo-control-room', component_id: 'motor-x1', qty: 2, estimated_unit_cost: 120.0 } },
+  { event_type: 'purchase.requested', source: 'ui-demo', payload: { domain: 'os.robotics', correlation_id: 'demo-control-room', purchase_id: 'demo-po-001', projected_cost: 240.0, risk_level: 'MEDIUM' } },
+];
+
+export async function sendDemoEvent(): Promise<void> {
+  const event = demoEvents[Math.floor(Math.random() * demoEvents.length)];
+  await apiRequest('/v1/events', { method: 'POST', body: event });
 }
