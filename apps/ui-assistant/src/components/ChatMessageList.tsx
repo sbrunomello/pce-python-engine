@@ -1,3 +1,6 @@
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
 import type { ChatEntry } from '../types';
 
 interface ChatMessageListProps {
@@ -6,6 +9,18 @@ interface ChatMessageListProps {
 
 function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function renderMessageContent(message: ChatEntry): JSX.Element {
+  if (message.role === 'assistant') {
+    return (
+      <div className="markdown-content text-sm leading-relaxed">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+      </div>
+    );
+  }
+
+  return <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.text}</p>;
 }
 
 export function ChatMessageList({ messages }: ChatMessageListProps): JSX.Element {
@@ -25,7 +40,7 @@ export function ChatMessageList({ messages }: ChatMessageListProps): JSX.Element
               : 'mr-auto bg-slate-800 text-slate-100'
           }`}
         >
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.text}</p>
+          {renderMessageContent(message)}
           <div className="mt-2 text-right text-[11px] opacity-75">{formatTime(message.createdAt)}</div>
         </article>
       ))}
