@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from typing import Any
 from uuid import uuid4
 
 from pce.core.plugins import AdaptationPlugin, DecisionPlugin, ValueModelPlugin
@@ -57,6 +58,7 @@ class AgentOrchestrator:
         bus = AgentBus(max_turns=self.max_turns)
         aggregated: list[dict[str, object]] = []
         diagnostics: dict[str, dict[str, object]] = defaultdict(dict)
+        transcript: list[dict[str, Any]] = []
 
         for agent in self.agents.values():
             output = agent.process(
@@ -71,6 +73,14 @@ class AgentOrchestrator:
                 )
             )
             self._collect(output, aggregated, diagnostics, agent.name)
+            transcript.extend(
+                self._output_transcript_items(
+                    output,
+                    agent_name=agent.name,
+                    correlation_id=correlation_id,
+                    decision_id=decision_id,
+                )
+            )
             for message in output.messages:
                 bus.enqueue(message)
 
@@ -94,6 +104,14 @@ class AgentOrchestrator:
                     )
                 )
                 self._collect(output, aggregated, diagnostics, agent.name)
+                transcript.extend(
+                    self._output_transcript_items(
+                        output,
+                        agent_name=agent.name,
+                        correlation_id=correlation_id,
+                        decision_id=decision_id,
+                    )
+                )
                 for message in output.messages:
                     bus.enqueue(message)
             logger.info(
@@ -106,7 +124,42 @@ class AgentOrchestrator:
             )
 
         unique_actions = self._dedupe_actions(aggregated)
-        return {"actions": unique_actions, "diagnostics": diagnostics}
+        return {"actions": unique_actions, "diagnostics": diagnostics, "transcript": transcript}
+
+    @staticmethod
+    def _output_transcript_items(
+        output: AgentOutput,
+        *,
+        agent_name: str,
+        correlation_id: str,
+        decision_id: str,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for message in output.messages:
+            items.append(
+                {
+                    "kind": "agent_message",
+                    "agent": message.from_agent or agent_name,
+                    "payload": {
+                        "to_agent": message.to_agent,
+                        "kind": message.kind,
+                        "content": message.content,
+                    },
+                    "correlation_id": correlation_id,
+                    "decision_id": decision_id,
+                }
+            )
+        if output.proposed_actions:
+            items.append(
+                {
+                    "kind": "actions_proposed",
+                    "agent": agent_name,
+                    "payload": {"actions": output.proposed_actions},
+                    "correlation_id": correlation_id,
+                    "decision_id": decision_id,
+                }
+            )
+        return items
 
     @staticmethod
     def _collect(
@@ -224,6 +277,7 @@ class OSRoboticsDecisionPlugin(DecisionPlugin):
             "twin_snapshot": twin_state.model_dump(mode="json"),
             "gate_required": event.event_type in {"purchase.requested"},
             "agent_diagnostics": orchestration["diagnostics"],
+            "agent_transcript": orchestration["transcript"],
             "candidate_actions": candidate_actions,
         }
 
