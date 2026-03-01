@@ -10,10 +10,18 @@ from trader_plugins.ao import MockBroker
 from trader_plugins.config import TraderConfig, mode_from_ccif
 from trader_plugins.dataset import build_feature_dataset_from_candles
 from trader_plugins.decision import TraderDecisionEngine
-from trader_plugins.events import EVENT_DECISION_PLAN_CREATED, EVENT_EXECUTION_FILLED, EVENT_MARKET_CANDLE_CLOSED, EVENT_POLICY_UPDATED
+from trader_plugins.events import (
+    EVENT_DECISION_PLAN_CREATED,
+    EVENT_EXECUTION_FILLED,
+    EVENT_MARKET_CANDLE_CLOSED,
+    EVENT_METRICS_CCIF_UPDATED,
+    EVENT_POLICY_UPDATED,
+    EVENT_VALUE_POLICY_UPDATED,
+)
 from trader_plugins.ledger import TraderEventLedger
 from trader_plugins.runtime import TraderRuntime
 from trader_plugins.types import Candle, TradePlan
+from trader_plugins.value_policy import default_value_policy
 
 
 def test_triple_barrier_labeling_uses_high_low_and_atr() -> None:
@@ -37,6 +45,7 @@ def test_macro_gate_blocks_bear() -> None:
         state={"limits": {}, "dd_day": 0.0, "dd_month": 0.0, "suggested_qty": 1.0, "portfolio": {"positions": {}}},
         mode="normal",
         lock_entries=False,
+        value_policy=default_value_policy(),
     )
     assert plan.action == "NO_TRADE"
     assert plan.gate_results[0]["passed"] is False
@@ -59,8 +68,8 @@ def test_ccif_modes() -> None:
 def test_mockbroker_buy_sell_realized_pnl() -> None:
     broker = MockBroker(TraderConfig(fee_bps=0.0, slippage_bps=0.0))
     state = {"portfolio": {"cash": 10_000.0, "positions": {}, "realized_pnl": 0.0}}
-    buy = TradePlan("dec1", "BTCUSDT", "ENTER_LONG", 1.0, "ok", 0.7, 0.2, 0.6, "normal", [])
-    sell = TradePlan("dec2", "BTCUSDT", "EXIT", 0.4, "ok", 0.2, 0.7, 0.6, "normal", [])
+    buy = TradePlan("dec1", "BTCUSDT", "ENTER_LONG", 1.0, "ok", 0.7, 0.2, 0.6, "normal", "value-pol-v1", [])
+    sell = TradePlan("dec2", "BTCUSDT", "EXIT_LONG", 0.4, "ok", 0.2, 0.7, 0.6, "normal", "value-pol-v1", [])
 
     broker.execute(buy, state, mark_price=100.0)
     out = broker.execute(sell, state, mark_price=120.0)
@@ -125,6 +134,83 @@ def test_drift_changes_policy_version_and_updates_ledger(tmp_path: Path) -> None
     assert runtime.state["policy"]["risk_per_trade"] < 0.005
     events = runtime.ledger.query(event_type=EVENT_POLICY_UPDATED, limit=5)
     assert events
+    assert runtime.ledger.query(event_type=EVENT_VALUE_POLICY_UPDATED, limit=5)
+
+
+def test_decision_generates_ranked_alternatives_and_selects_best() -> None:
+    engine = TraderDecisionEngine(TraderConfig())
+    state = {
+        "limits": {},
+        "dd_day": 0.0,
+        "dd_month": 0.0,
+        "suggested_qty": 1.0,
+        "portfolio": {"positions": {"BTCUSDT": {"qty": 0.0, "avg_price": 0.0}}},
+        "market": {"BTCUSDT": {"1h": {"features": {"atr": 2.0}}}},
+        "prices": {"BTCUSDT": 100.0},
+    }
+    plan = engine.deliberate(
+        symbol="BTCUSDT",
+        macro_regime="bull",
+        model_out={"p_win": 0.72, "uncertainty": 0.2},
+        state=state,
+        mode="normal",
+        lock_entries=False,
+        value_policy=default_value_policy(),
+    )
+    assert len(plan.alternatives) == 5
+    assert plan.alternatives[0].final_score >= plan.alternatives[1].final_score
+    assert plan.action == plan.alternatives[0].option_type
+
+
+def test_tradeplan_contains_stop_take_and_r_values() -> None:
+    engine = TraderDecisionEngine(TraderConfig())
+    state = {
+        "limits": {},
+        "dd_day": 0.0,
+        "dd_month": 0.0,
+        "suggested_qty": 2.0,
+        "portfolio": {"positions": {}},
+        "market": {"BTCUSDT": {"1h": {"features": {"atr": 5.0}}}},
+        "prices": {"BTCUSDT": 100.0},
+    }
+    plan = engine.deliberate(
+        symbol="BTCUSDT",
+        macro_regime="bull",
+        model_out={"p_win": 0.8, "uncertainty": 0.1},
+        state=state,
+        mode="normal",
+        lock_entries=False,
+        value_policy=default_value_policy(),
+    )
+    if plan.action == "ENTER_LONG":
+        assert plan.stop_price == 95.0
+        assert plan.take_price == 110.0
+        assert plan.risk_R == 5.0
+        assert plan.expected_R > 0.0
+
+
+def test_ccif_components_and_locked_mode_when_low(tmp_path: Path) -> None:
+    cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
+    runtime = TraderRuntime(cfg)
+    runtime.state["metrics"]["p_win_avg"] = 0.1
+    runtime.state["metrics"]["recent_outcomes"] = [0.0] * 20
+    runtime.state["portfolio"]["positions"] = {"BTCUSDT": {"qty": 10.0, "avg_price": 100.0}}
+    runtime.state["prices"] = {"BTCUSDT": 100.0}
+    candle = Candle("BTCUSDT", "1h", datetime(2026, 1, 1, 1, 0, tzinfo=UTC), 100, 100, 99, 100, 1)
+    runtime.on_candle(candle)
+    assert "dc" in runtime.state["metrics"] and "rs" in runtime.state["metrics"] and "vr" in runtime.state["metrics"] and "pa" in runtime.state["metrics"]
+    assert runtime.ledger.query(event_type=EVENT_METRICS_CCIF_UPDATED, limit=5)
+    assert runtime.state["metrics"]["mode"] in {"restricted", "locked", "cautious", "normal"}
+
+
+def test_value_policy_versions_increase_on_roll(tmp_path: Path) -> None:
+    cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
+    runtime = TraderRuntime(cfg)
+    first = runtime.state["value_policy"]["value_policy_version"]
+    runtime._roll_value_policy(correlation_id="cid", causation_id="cause", reason="test", quality_floor=0.5, risk_ceiling=0.6)
+    second = runtime.state["value_policy"]["value_policy_version"]
+    assert first != second
+    assert runtime.ledger.query(event_type=EVENT_VALUE_POLICY_UPDATED, limit=1)
 
 
 def test_replay_deterministic_same_final_state_and_decision_events(tmp_path: Path) -> None:

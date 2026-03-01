@@ -20,7 +20,7 @@ class MockBroker:
         positions = portfolio.setdefault("positions", {})
         position = positions.setdefault(plan.symbol, {"qty": 0.0, "avg_price": 0.0})
 
-        if plan.action == "NO_TRADE" or plan.qty <= 0:
+        if plan.action in {"NO_TRADE", "HOLD"} or plan.qty <= 0:
             return FillResult(
                 event_type=EVENT_EXECUTION_SKIPPED,
                 source="trader/ao",
@@ -29,6 +29,13 @@ class MockBroker:
 
         fee_mult = self._config.fee_bps / 10_000.0
         slippage_mult = self._config.slippage_bps / 10_000.0
+
+        if plan.action not in {"ENTER_LONG", "EXIT_LONG", "REDUCE", "EXIT"}:
+            return FillResult(
+                event_type=EVENT_EXECUTION_SKIPPED,
+                source="trader/ao",
+                payload={"decision_id": plan.decision_id, "reason": f"unsupported_action:{plan.action}", "symbol": plan.symbol},
+            )
 
         side = "BUY" if plan.action == "ENTER_LONG" else "SELL"
         signed_slippage = slippage_mult if side == "BUY" else -slippage_mult
