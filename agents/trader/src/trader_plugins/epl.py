@@ -5,19 +5,20 @@ from __future__ import annotations
 from datetime import timedelta
 from hashlib import sha256
 
-from trader_plugins.types import Candle, InternalEvent
+from trader_plugins.events import EVENT_MARKET_CANDLE_CLOSED, EventEnvelope, new_correlation_id
+from trader_plugins.types import Candle
 
 _TIMEFRAME_DELTA = {"1h": timedelta(hours=1), "4h": timedelta(hours=4)}
 
 
 class TraderEPL:
-    """Normalizes candles and emits idempotent internal events."""
+    """Normalizes candles and emits idempotent market envelopes."""
 
     def __init__(self) -> None:
         self._last_ts: dict[tuple[str, str], object] = {}
         self._seen_keys: set[str] = set()
 
-    def ingest(self, candle: Candle) -> InternalEvent:
+    def ingest(self, candle: Candle, *, correlation_id: str | None = None) -> EventEnvelope:
         key = (candle.symbol, candle.timeframe)
         previous = self._last_ts.get(key)
         delta = _TIMEFRAME_DELTA.get(candle.timeframe)
@@ -41,8 +42,11 @@ class TraderEPL:
 
         self._last_ts[key] = candle.timestamp
 
-        return InternalEvent(
-            event_type="market.candle",
+        return EventEnvelope(
+            event_type=EVENT_MARKET_CANDLE_CLOSED,
+            source="trader/epl",
+            actor="trader/epl",
+            correlation_id=correlation_id or new_correlation_id(),
             payload={
                 "symbol": candle.symbol,
                 "timeframe": candle.timeframe,
@@ -56,5 +60,4 @@ class TraderEPL:
                 "integrity_issues": issues,
                 "integrity_ok": len(issues) == 0,
             },
-            source="trader/epl",
         )

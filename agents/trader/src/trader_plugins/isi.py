@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from statistics import mean
 
-from trader_plugins.types import InternalEvent
+from trader_plugins.events import EventEnvelope
 
 
 class TraderISI:
@@ -14,7 +14,7 @@ class TraderISI:
     def __init__(self, maxlen: int = 1200) -> None:
         self._candles: dict[tuple[str, str], deque[dict[str, float]]] = defaultdict(lambda: deque(maxlen=maxlen))
 
-    def integrate(self, event: InternalEvent) -> dict[str, object]:
+    def integrate(self, event: EventEnvelope) -> dict[str, object]:
         payload = event.payload
         symbol = str(payload["symbol"])
         timeframe = str(payload["timeframe"])

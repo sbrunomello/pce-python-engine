@@ -30,7 +30,12 @@ class TraderDecisionEngine:
         threshold = float(state.get("dynamic_threshold", self._config.p_win_threshold))
         gate_results: list[dict[str, object]] = []
 
-        macro_pass = macro_regime != "bear" and macro_regime != "invalid"
+        portfolio = state.get("portfolio", {}) if isinstance(state.get("portfolio"), dict) else {}
+        positions = portfolio.get("positions", {}) if isinstance(portfolio.get("positions"), dict) else {}
+        symbol_pos = positions.get(symbol, {}) if isinstance(positions.get(symbol), dict) else {}
+        current_qty = float(symbol_pos.get("qty", 0.0))
+
+        macro_pass = macro_regime not in {"bear", "invalid"}
         gate_results.append({"gate": "macro_4h", "passed": macro_pass, "value": macro_regime})
 
         model_pass = p_win >= threshold and uncertainty <= 0.45
@@ -55,20 +60,40 @@ class TraderDecisionEngine:
         )
         gate_results.append({"gate": "guardrails", "passed": guardrails_pass})
 
-        allow_trade = macro_pass and model_pass and guardrails_pass
-        qty = float(state.get("suggested_qty", 0.0)) if allow_trade else 0.0
-        action = "BUY" if allow_trade else "NO_TRADE"
+        # Exit-first policy: if already long and confidence/regime deteriorates, reduce risk.
+        exit_signal = current_qty > 0 and (
+            p_win < max(0.05, threshold - 0.05) or uncertainty > 0.60 or macro_regime in {"bear", "invalid"} or mode == "locked"
+        )
+        enter_signal = current_qty <= 0 and macro_pass and model_pass and guardrails_pass
+
+        action = "NO_TRADE"
+        qty = 0.0
+        if exit_signal:
+            action = "EXIT"
+            qty = round(current_qty, 6)
+        elif enter_signal:
+            action = "ENTER_LONG"
+            qty = float(state.get("suggested_qty", 0.0))
+
+        if not guardrails_pass and action == "ENTER_LONG":
+            qty = 0.0
+            action = "NO_TRADE"
+
+        risk_snapshot = {
+            "risk_budget": float(state.get("risk_budget", 0.0)),
+            "equity": float(portfolio.get("equity", self._config.starting_cash)),
+        }
 
         return TradePlan(
             decision_id=f"dec-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}",
             symbol=symbol,
             action=action,
-            qty=qty,
+            qty=round(max(0.0, qty), 6),
             reason="; ".join([f"{row['gate']}={'PASS' if row['passed'] else 'FAIL'}" for row in gate_results]),
             p_win=p_win,
             uncertainty=uncertainty,
             threshold=threshold,
             mode=mode,
             gate_results=gate_results,
-            metadata={"ts": now.isoformat()},
+            metadata={"ts": now.isoformat(), "risk_snapshot": risk_snapshot},
         )
