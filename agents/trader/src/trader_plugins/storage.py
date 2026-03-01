@@ -40,7 +40,8 @@ class TraderStorage:
             "market": {},
             "prices": {},
             "fills": [],
-            "models": {"active": None, "registry": []},
+            "models": {"active": None, "active_model_version": None, "registry": []},
+            "policy": {"policy_version": "pol-bootstrap", "mode": "restricted", "dynamic_threshold": 0.60, "risk_per_trade": 0.005},
             "metrics": {
                 "decisions_total": 0,
                 "trades_executed": 0,
@@ -48,6 +49,7 @@ class TraderStorage:
                 "p_win_avg": 0.0,
                 "drift_flags": [],
                 "mode": "cautious",
+                "recent_outcomes": [],
             },
         }
         self.save_runtime_state(state)

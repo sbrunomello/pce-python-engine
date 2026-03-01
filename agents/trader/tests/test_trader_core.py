@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-from trader_plugins.adaptation import triple_barrier_labels
+from trader_plugins.adaptation import LabelingConfig, triple_barrier_labels_from_ohlc
 from trader_plugins.ao import MockBroker
 from trader_plugins.config import TraderConfig, mode_from_ccif
+from trader_plugins.dataset import build_feature_dataset_from_candles
 from trader_plugins.decision import TraderDecisionEngine
-from trader_plugins.events import EVENT_DECISION_PLAN_CREATED, EVENT_EXECUTION_FILLED, EVENT_MARKET_CANDLE_CLOSED
+from trader_plugins.events import EVENT_DECISION_PLAN_CREATED, EVENT_EXECUTION_FILLED, EVENT_MARKET_CANDLE_CLOSED, EVENT_POLICY_UPDATED
 from trader_plugins.ledger import TraderEventLedger
 from trader_plugins.runtime import TraderRuntime
 from trader_plugins.types import Candle, TradePlan
 
 
-def test_triple_barrier_labeling() -> None:
-    closes = [100, 101, 103, 99, 97, 96, 98]
-    labels = triple_barrier_labels(closes, horizon=3, tp=0.02, sl=0.02)
+def test_triple_barrier_labeling_uses_high_low_and_atr() -> None:
+    rows = [
+        {"close": 100.0, "high": 100.0, "low": 100.0, "atr": 1.0},
+        {"close": 100.1, "high": 101.6, "low": 99.8, "atr": 1.0},
+        {"close": 100.0, "high": 100.0, "low": 98.8, "atr": 1.0},
+    ]
+    cfg = LabelingConfig(version="lbl", horizon=2, tp_atr_mult=1.5, sl_atr_mult=1.0)
+    labels = triple_barrier_labels_from_ohlc(rows, config=cfg)
     assert labels[0] == "TP_FIRST"
-    assert labels[2] == "SL_FIRST"
+    assert labels == triple_barrier_labels_from_ohlc(rows, config=cfg)
 
 
 def test_macro_gate_blocks_bear() -> None:
@@ -62,20 +70,71 @@ def test_mockbroker_buy_sell_realized_pnl() -> None:
     assert state["portfolio"]["realized_pnl"] == 8.0
 
 
-def test_replay_deterministic_same_final_state_and_decision_events(tmp_path) -> None:
+def test_dataset_build_expected_columns_and_deterministic_hash(tmp_path: Path) -> None:
+    candles = tmp_path / "candles.csv"
+    candles.write_text(
+        "symbol,timeframe,timestamp,open,high,low,close,volume\n"
+        "BTCUSDT,1h,2026-01-01T00:00:00+00:00,100,101,99,100,1\n"
+        "BTCUSDT,1h,2026-01-01T01:00:00+00:00,100,102,99,101,1\n",
+        encoding="utf-8",
+    )
+    out1 = tmp_path / "d1.csv"
+    out2 = tmp_path / "d2.csv"
+    r1 = build_feature_dataset_from_candles(candles, ["BTCUSDT"], "1h", 120, out1)
+    r2 = build_feature_dataset_from_candles(candles, ["BTCUSDT"], "1h", 120, out2)
+    assert r1["dataset_hash"] == r2["dataset_hash"]
+    with out1.open("r", encoding="utf-8") as handle:
+        cols = next(csv.reader(handle))
+    assert "ret_1" in cols and "atr" in cols and "dataset_hash" in cols and "feature_version" in cols
+
+
+def test_walk_forward_metrics_and_registry_lifecycle(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.csv"
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    lines = ["symbol,timeframe,timestamp,open,high,low,close,volume,ret_1,ret_6,atr,rsi,ema_slope,bb_width,adx_like,integrity_ok,regime_4h,feature_version,dataset_hash"]
+    for i in range(80):
+        direction = 1 if i % 2 == 0 else -1
+        close = 100 + direction * (i * 0.2)
+        high = close + (2.0 if direction > 0 else 0.8)
+        low = close - (2.0 if direction < 0 else 0.8)
+        ret_1 = 0.01 if direction > 0 else -0.01
+        ret_6 = 0.02 if direction > 0 else -0.02
+        lines.append(f"BTCUSDT,1h,{(start + timedelta(hours=i)).isoformat()},100,{high},{low},{close},100,{ret_1},{ret_6},1.0,55,{ret_1},0.1,20,True,,feat-v2,hash1")
+    dataset.write_text("\n".join(lines), encoding="utf-8")
+
+    cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
+    runtime = TraderRuntime(cfg)
+    result = runtime.train_from_csv(dataset)
+    assert result["trained"] is True
+    assert len(result["fold_metrics"]) >= 1
+    assert "accuracy" in result["aggregate_metrics"]
+
+    act = runtime.activate_model(result["version"])
+    assert act["activated"] is True
+
+
+def test_drift_changes_policy_version_and_updates_ledger(tmp_path: Path) -> None:
+    cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
+    runtime = TraderRuntime(cfg)
+    runtime.state["policy"] = {"policy_version": "pol-old", "dynamic_threshold": 0.6, "risk_per_trade": 0.005, "mode": "normal"}
+    runtime.state["metrics"]["recent_outcomes"] = [0.0] * 10
+    runtime._active_model_meta = {"model_version": "m1", "aggregate_metrics": {"accuracy": 0.9}, "label_version": "lbl"}
+    runtime._maybe_apply_drift_policy(correlation_id="cid-1", causation_id="cause-1")
+    assert runtime.state["policy"]["policy_version"] != "pol-old"
+    assert runtime.state["policy"]["dynamic_threshold"] > 0.6
+    assert runtime.state["policy"]["risk_per_trade"] < 0.005
+    events = runtime.ledger.query(event_type=EVENT_POLICY_UPDATED, limit=5)
+    assert events
+
+
+def test_replay_deterministic_same_final_state_and_decision_events(tmp_path: Path) -> None:
     csv_path = tmp_path / "candles.csv"
     start = datetime(2026, 1, 1, tzinfo=UTC)
     csv_path.write_text(
         "symbol,timeframe,timestamp,open,high,low,close,volume\n"
         + "\n".join(
-            [
-                f"BTCUSDT,4h,{(start + timedelta(hours=4*i)).isoformat()},100,101,99,{100 + i},1000"
-                for i in range(12)
-            ]
-            + [
-                f"BTCUSDT,1h,{(start + timedelta(hours=i)).isoformat()},100,101,99,{100 + i*0.5},900"
-                for i in range(24)
-            ]
+            [f"BTCUSDT,4h,{(start + timedelta(hours=4*i)).isoformat()},100,101,99,{100 + i},1000" for i in range(12)]
+            + [f"BTCUSDT,1h,{(start + timedelta(hours=i)).isoformat()},100,101,99,{100 + i*0.5},900" for i in range(24)]
         ),
         encoding="utf-8",
     )
@@ -99,7 +158,7 @@ def test_replay_deterministic_same_final_state_and_decision_events(tmp_path) -> 
     assert s1["portfolio"]["equity"] == s2["portfolio"]["equity"]
 
 
-def test_daily_monthly_reset_and_day_start_equity(tmp_path) -> None:
+def test_daily_monthly_reset_and_day_start_equity(tmp_path: Path) -> None:
     cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
     runtime = TraderRuntime(cfg)
     runtime.state["limits"]["trades_total_day"] = 3
@@ -114,7 +173,7 @@ def test_daily_monthly_reset_and_day_start_equity(tmp_path) -> None:
     assert runtime.state["limits"]["trades_total_day"] >= 0
 
 
-def test_mtm_by_symbol_equity_calculation(tmp_path) -> None:
+def test_mtm_by_symbol_equity_calculation(tmp_path: Path) -> None:
     cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
     runtime = TraderRuntime(cfg)
     runtime.state["portfolio"] = {
@@ -129,7 +188,7 @@ def test_mtm_by_symbol_equity_calculation(tmp_path) -> None:
     assert runtime.state["portfolio"]["equity"] == 64_000.0
 
 
-def test_causality_chain_candle_to_decision_to_execution(tmp_path) -> None:
+def test_causality_chain_candle_to_decision_to_execution(tmp_path: Path) -> None:
     cfg = TraderConfig(db_url=f"sqlite:///{tmp_path / 'state.db'}", artifacts_dir=tmp_path / "art", logs_dir=tmp_path / "art" / "logs")
     runtime = TraderRuntime(cfg)
 
@@ -146,9 +205,9 @@ def test_causality_chain_candle_to_decision_to_execution(tmp_path) -> None:
     assert execution[0]["causation_id"] == decision["event_id"]
 
 
-def test_ledger_tail_query(tmp_path) -> None:
+def test_ledger_tail_query(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     ledger = TraderEventLedger(path)
-    path.write_text('\n'.join([json.dumps({"event_type": "a", "payload": {"symbol": "BTC"}, "ts": "2026-01-01T00:00:00+00:00"}) for _ in range(3)]) + '\n', encoding='utf-8')
+    path.write_text("\n".join([json.dumps({"event_type": "a", "payload": {"symbol": "BTC"}, "ts": "2026-01-01T00:00:00+00:00"}) for _ in range(3)]) + "\n", encoding="utf-8")
     assert len(ledger.tail(2)) == 2
     assert len(ledger.query(event_type="a", symbol="BTC", limit=2)) == 2
