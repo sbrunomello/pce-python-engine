@@ -17,6 +17,12 @@ EVENT_METRICS_UPDATED = "metrics.updated"
 EVENT_GUARDRAIL_LOCKED = "guardrail.locked"
 EVENT_GUARDRAIL_UNLOCKED = "guardrail.unlocked"
 EVENT_DATA_INTEGRITY_DEGRADED = "system.data_integrity.degraded"
+EVENT_LEARNING_TRAIN_RUN_STARTED = "learning.train.run.started"
+EVENT_LEARNING_TRAIN_RUN_COMPLETED = "learning.train.run.completed"
+EVENT_LEARNING_MODEL_PROMOTED = "learning.model.promoted"
+EVENT_LEARNING_MODEL_ROLLED_BACK = "learning.model.rolled_back"
+EVENT_LEARNING_DRIFT_DETECTED = "learning.drift.detected"
+EVENT_POLICY_UPDATED = "policy.updated"
 
 
 @dataclass(slots=True)

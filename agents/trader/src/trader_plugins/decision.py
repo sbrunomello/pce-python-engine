@@ -38,12 +38,14 @@ class TraderDecisionEngine:
         macro_pass = macro_regime not in {"bear", "invalid"}
         gate_results.append({"gate": "macro_4h", "passed": macro_pass, "value": macro_regime})
 
-        model_pass = p_win >= threshold and uncertainty <= 0.45
+        uncertainty_limit = self._uncertainty_limit(mode)
+        model_missing = bool(model_out.get("model_missing", 0.0))
+        model_pass = (not model_missing) and p_win >= threshold and uncertainty <= uncertainty_limit
         gate_results.append(
             {
                 "gate": "model",
                 "passed": model_pass,
-                "value": {"p_win": p_win, "uncertainty": uncertainty, "threshold": threshold},
+                "value": {"p_win": p_win, "uncertainty": uncertainty, "threshold": threshold, "uncertainty_limit": uncertainty_limit, "model_missing": model_missing},
             }
         )
 
@@ -64,7 +66,7 @@ class TraderDecisionEngine:
         exit_signal = current_qty > 0 and (
             p_win < max(0.05, threshold - 0.05) or uncertainty > 0.60 or macro_regime in {"bear", "invalid"} or mode == "locked"
         )
-        enter_signal = current_qty <= 0 and macro_pass and model_pass and guardrails_pass
+        enter_signal = current_qty <= 0 and macro_pass and model_pass and guardrails_pass and mode != "locked"
 
         action = "NO_TRADE"
         qty = 0.0
@@ -97,3 +99,13 @@ class TraderDecisionEngine:
             gate_results=gate_results,
             metadata={"ts": now.isoformat(), "risk_snapshot": risk_snapshot},
         )
+
+
+    def _uncertainty_limit(self, mode: str) -> float:
+        if mode == "normal":
+            return self._config.uncertainty_gate_normal
+        if mode == "cautious":
+            return self._config.uncertainty_gate_cautious
+        if mode == "restricted":
+            return self._config.uncertainty_gate_restricted
+        return 0.0
