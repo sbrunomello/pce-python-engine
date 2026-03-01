@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trader Runtime UI</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Trader Runtime Dashboard</h1>
+    <div class="controls">
+      <button data-action="start">Start</button>
+      <button data-action="stop">Stop</button>
+      <button data-action="pause">Pause</button>
+      <button data-action="resume">Resume</button>
+      <button data-action="train">Train</button>
+    </div>
+  </header>
+
+  <nav id="tabs"></nav>
+  <main id="content"></main>
+
+  <template id="panel-template">
+    <section class="panel"></section>
+  </template>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

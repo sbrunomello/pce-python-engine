@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     live = sub.add_parser("live-demo", help="Fetch latest real market data and run one cycle")
     live.add_argument("--output", default="agents/trader/artifacts/live_demo.json", help="Output JSON path")
 
+    ui = sub.add_parser("ui", help="Run local Trader web UI server")
+    ui.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    ui.add_argument("--port", type=int, default=8787, help="UI port")
+    ui.add_argument("--loop-interval", type=float, default=5.0, help="Control-loop interval in seconds")
+
     return parser
 
 
@@ -52,6 +57,13 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps({"output": str(out), "decisions": len(result)}, ensure_ascii=False))
+        return 0
+
+    if args.command == "ui":
+        import uvicorn
+        from ui_server import create_app
+
+        uvicorn.run(create_app(loop_interval_s=args.loop_interval), host=args.host, port=args.port)
         return 0
 
     return 1
