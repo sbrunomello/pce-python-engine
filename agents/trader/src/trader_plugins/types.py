@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 
 @dataclass(slots=True)
@@ -23,17 +22,6 @@ class Candle:
 
 
 @dataclass(slots=True)
-class InternalEvent:
-    """Internal event emitted by EPL and execution pipeline."""
-
-    event_type: str
-    payload: dict[str, Any]
-    source: str = "trader"
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-
-@dataclass(slots=True)
 class TradePlan:
     """Audit-friendly trade plan produced by Decision Engine."""
 
@@ -48,3 +36,13 @@ class TradePlan:
     mode: str
     gate_results: list[dict[str, Any]]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class FillResult:
+    """Execution fill/skipped result normalized as payload."""
+
+    event_type: str
+    payload: dict[str, Any]
+    source: str = "trader/ao"
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

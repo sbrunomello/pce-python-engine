@@ -1,4 +1,4 @@
-"""End-to-end Trader runtime wiring EPL->ISI->VEL->SM->DE->AO->AFS."""
+"""End-to-end Trader runtime wiring EPL->ISI->VEL->SM->DE->AO->AFS with PCE-like ledger."""
 
 from __future__ import annotations
 
@@ -16,8 +16,20 @@ from trader_plugins.ao import MockBroker
 from trader_plugins.config import TraderConfig, mode_from_ccif
 from trader_plugins.decision import TraderDecisionEngine
 from trader_plugins.epl import TraderEPL
+from trader_plugins.events import (
+    EVENT_DATA_INTEGRITY_DEGRADED,
+    EVENT_DECISION_PLAN_CREATED,
+    EVENT_EXECUTION_FILLED,
+    EVENT_EXECUTION_SKIPPED,
+    EVENT_GUARDRAIL_LOCKED,
+    EVENT_GUARDRAIL_UNLOCKED,
+    EVENT_METRICS_UPDATED,
+    EVENT_STATE_INTEGRATED,
+    EventEnvelope,
+)
 from trader_plugins.expression import TraderExpressionLayer
 from trader_plugins.isi import TraderISI
+from trader_plugins.ledger import TraderEventLedger
 from trader_plugins.storage import TraderStorage
 from trader_plugins.types import Candle
 from trader_plugins.value_model import TraderValueModel
@@ -31,6 +43,7 @@ class TraderRuntime:
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
         self.storage = TraderStorage(self.config.db_url)
         self.state = self.storage.load_runtime_state()
+        self.ledger = TraderEventLedger(self.config.artifacts_dir / "ledger" / "events.jsonl")
         self.epl = TraderEPL()
         self.isi = TraderISI()
         self.vel = TraderValueModel()
@@ -108,16 +121,52 @@ class TraderRuntime:
         return output
 
     def on_candle(self, candle: Candle) -> dict[str, Any] | None:
-        event = self.epl.ingest(candle)
-        integrated = self.isi.integrate(event)
+        market_event = self.epl.ingest(candle)
+        self.ledger.append(market_event)
+
+        integrated = self.isi.integrate(market_event)
         symbol = integrated["symbol"]
         timeframe = integrated["timeframe"]
+        features = integrated["features"]
 
         self.state.setdefault("market", {}).setdefault(symbol, {})[timeframe] = integrated
-        features = integrated["features"]
+        self._update_prices(symbol, float(features.get("last_close", candle.close)))
+        self._update_risk_state(candle.timestamp)
+
+        state_event = self._emit(
+            event_type=EVENT_STATE_INTEGRATED,
+            source="trader/isi",
+            actor="trader/isi",
+            correlation_id=market_event.correlation_id,
+            causation_id=market_event.event_id,
+            payload={
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timestamp": integrated["timestamp"],
+                "regime": integrated["regime"],
+                "features": {
+                    "ret_1": features.get("ret_1"),
+                    "ret_6": features.get("ret_6"),
+                    "atr": features.get("atr"),
+                    "rsi": features.get("rsi"),
+                    "integrity_ok": features.get("integrity_ok"),
+                },
+            },
+        )
+
         data_lock = not bool(features.get("integrity_ok", True))
+        if data_lock:
+            self._emit(
+                event_type=EVENT_DATA_INTEGRITY_DEGRADED,
+                source="trader/isi",
+                actor="trader/isi",
+                correlation_id=market_event.correlation_id,
+                causation_id=state_event.event_id,
+                payload={"symbol": symbol, "timeframe": timeframe, "issues": list(features.get("integrity_issues", []))},
+            )
 
         if timeframe != self.config.execution_timeframe:
+            self._emit_metrics(market_event.correlation_id, state_event.event_id, reset_reason="market_update")
             self._persist()
             return None
 
@@ -126,11 +175,13 @@ class TraderRuntime:
 
         p_win, uncertainty = self._model_predict(features)
         value_scores = self.vel.evaluate(integrated, p_win)
+        previous_mode = str(self.state.get("metrics", {}).get("mode", "cautious"))
         self._update_ccif(value_scores, data_lock)
-        self._update_risk_state(symbol, float(features.get("last_close", candle.close)))
+        self._emit_guardrail_transition(previous_mode, str(self.state.get("metrics", {}).get("mode", "cautious")), market_event)
 
         suggested_qty = self._size_from_risk(float(features.get("atr", 0.0)), float(features.get("last_close", candle.close)))
         self.state["suggested_qty"] = suggested_qty
+
         plan = self.de.deliberate(
             symbol=str(symbol),
             macro_regime=macro_regime,
@@ -139,8 +190,39 @@ class TraderRuntime:
             mode=str(self.state.get("metrics", {}).get("mode", "cautious")),
             lock_entries=data_lock,
         )
+
+        decision_event = self._emit(
+            event_type=EVENT_DECISION_PLAN_CREATED,
+            source="trader/de",
+            actor="trader/de",
+            correlation_id=market_event.correlation_id,
+            causation_id=market_event.event_id,
+            payload={
+                "symbol": symbol,
+                "plan": asdict(plan),
+                "references": {"correlation_id": market_event.correlation_id, "causation_id": market_event.event_id},
+                "risk_budget": self.state.get("risk_budget", 0.0),
+                "equity": self.state.get("portfolio", {}).get("equity", self.config.starting_cash),
+            },
+        )
+
         fill = self.ao.execute(plan, self.state, float(features.get("last_close", candle.close)))
-        if fill.event_type == "execution.fill":
+        execution_event = self._emit(
+            event_type=fill.event_type if fill.event_type in {EVENT_EXECUTION_FILLED, EVENT_EXECUTION_SKIPPED} else EVENT_EXECUTION_SKIPPED,
+            source=fill.source,
+            actor="trader/ao",
+            correlation_id=market_event.correlation_id,
+            causation_id=decision_event.event_id,
+            payload=fill.payload,
+        )
+
+        fills = self.state.setdefault("fills", [])
+        if isinstance(fills, list):
+            fills.append(fill.payload)
+            if len(fills) > 500:
+                del fills[:-500]
+
+        if execution_event.event_type == EVENT_EXECUTION_FILLED:
             limits = self.state.get("limits", {})
             limits["trades_total_day"] = int(limits.get("trades_total_day", 0)) + 1
             by_asset = limits.setdefault("trades_by_asset_day", {})
@@ -148,10 +230,12 @@ class TraderRuntime:
             self.state.get("metrics", {})["trades_executed"] = int(self.state.get("metrics", {}).get("trades_executed", 0)) + 1
 
         self.state.get("metrics", {})["decisions_total"] = int(self.state.get("metrics", {}).get("decisions_total", 0)) + 1
-        self.state.get("metrics", {})["p_win_avg"] = (
-            float(self.state.get("metrics", {}).get("p_win_avg", 0.0)) * 0.9 + p_win * 0.1
-        )
+        self.state.get("metrics", {})["p_win_avg"] = float(self.state.get("metrics", {}).get("p_win_avg", 0.0)) * 0.9 + p_win * 0.1
 
+        self._update_portfolio_unrealized()
+        self._update_risk_state(candle.timestamp)
+
+        metrics_event = self._emit_metrics(market_event.correlation_id, execution_event.event_id)
         explanation = self.expression.explain(
             plan,
             {
@@ -164,22 +248,83 @@ class TraderRuntime:
 
         decision = {
             "decision_id": plan.decision_id,
-            "event_id": event.event_id,
+            "event_id": market_event.event_id,
+            "decision_event_id": decision_event.event_id,
+            "execution_event_id": execution_event.event_id,
+            "metrics_event_id": metrics_event.event_id,
             "symbol": symbol,
             "plan": asdict(plan),
             "execution": fill.payload,
             "metrics": self.state.get("metrics", {}),
             "explanation": explanation,
+            "correlation_id": market_event.correlation_id,
+            "causation_id": market_event.event_id,
         }
         self._log_json("decisions", decision)
         self._persist()
         return decision
 
+    def _emit(self, *, event_type: str, source: str, correlation_id: str, payload: dict[str, Any], causation_id: str | None = None, actor: str | None = None) -> EventEnvelope:
+        env = EventEnvelope(
+            event_type=event_type,
+            source=source,
+            payload=payload,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            actor=actor,
+        )
+        self.ledger.append(env)
+        return env
+
+    def _emit_metrics(self, correlation_id: str, causation_id: str, reset_reason: str | None = None) -> EventEnvelope:
+        payload = {
+            "cci_f": self.state.get("metrics", {}).get("cci_f", 0.0),
+            "dd_day": self.state.get("dd_day", 0.0),
+            "dd_month": self.state.get("dd_month", 0.0),
+            "trades_total_day": self.state.get("limits", {}).get("trades_total_day", 0),
+            "mode": self.state.get("metrics", {}).get("mode", "cautious"),
+            "equity": self.state.get("portfolio", {}).get("equity", self.config.starting_cash),
+        }
+        if reset_reason:
+            payload["reset_reason"] = reset_reason
+        return self._emit(
+            event_type=EVENT_METRICS_UPDATED,
+            source="trader/runtime",
+            actor="trader/runtime",
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            payload=payload,
+        )
+
+    def _emit_guardrail_transition(self, previous_mode: str, current_mode: str, market_event: EventEnvelope) -> None:
+        if previous_mode != "locked" and current_mode == "locked":
+            self._emit(
+                event_type=EVENT_GUARDRAIL_LOCKED,
+                source="trader/runtime",
+                actor="trader/runtime",
+                correlation_id=market_event.correlation_id,
+                causation_id=market_event.event_id,
+                payload={"reason": "mode_locked", "symbol": market_event.payload.get("symbol")},
+            )
+        elif previous_mode == "locked" and current_mode != "locked":
+            self._emit(
+                event_type=EVENT_GUARDRAIL_UNLOCKED,
+                source="trader/runtime",
+                actor="trader/runtime",
+                correlation_id=market_event.correlation_id,
+                causation_id=market_event.event_id,
+                payload={"reason": "mode_recovered", "symbol": market_event.payload.get("symbol")},
+            )
+
     def _size_from_risk(self, atr: float, price: float) -> float:
         equity = float(self.state.get("portfolio", {}).get("equity", self.config.starting_cash))
         risk_budget = equity * self.config.risk.risk_per_trade
+        self.state["risk_budget"] = risk_budget
         stop_distance = max(atr, price * 0.005)
-        qty = risk_budget / max(stop_distance, 1e-9)
+        mode = str(self.state.get("metrics", {}).get("mode", "cautious"))
+        if mode == "locked" or stop_distance <= 0:
+            return 0.0
+        qty = risk_budget / stop_distance
         return round(max(0.0, qty), 6)
 
     def _model_predict(self, features: dict[str, Any]) -> tuple[float, float]:
@@ -205,18 +350,60 @@ class TraderRuntime:
         self.state.setdefault("metrics", {})["cci_f"] = next_ccif
         self.state.setdefault("metrics", {})["mode"] = mode
 
-    def _update_risk_state(self, symbol: str, mark_price: float) -> None:
-        _ = symbol
+    def _update_prices(self, symbol: str, mark_price: float) -> None:
+        prices = self.state.setdefault("prices", {})
+        prices[symbol] = mark_price
+
+    def _update_portfolio_unrealized(self) -> None:
+        portfolio = self.state.get("portfolio", {})
+        positions = portfolio.get("positions", {}) if isinstance(portfolio.get("positions"), dict) else {}
+        prices = self.state.get("prices", {}) if isinstance(self.state.get("prices"), dict) else {}
+        unrealized = 0.0
+        for sym, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
+            qty = float(pos.get("qty", 0.0))
+            if qty <= 0:
+                continue
+            avg = float(pos.get("avg_price", 0.0))
+            mark = float(prices.get(sym, avg))
+            unrealized += (mark - avg) * qty
+        portfolio["unrealized_pnl"] = unrealized
+
+    def _apply_period_resets(self, now_ts: datetime) -> list[str]:
+        limits = self.state.setdefault("limits", {})
+        portfolio = self.state.setdefault("portfolio", {})
+        day_key = now_ts.astimezone(UTC).strftime("%Y-%m-%d")
+        month_key = now_ts.astimezone(UTC).strftime("%Y-%m")
+        events: list[str] = []
+
+        if str(limits.get("last_day", "")) != day_key:
+            limits["trades_total_day"] = 0
+            limits["trades_by_asset_day"] = {}
+            limits["day_start_equity"] = float(portfolio.get("equity", self.config.starting_cash))
+            limits["last_day"] = day_key
+            events.append("daily")
+
+        if str(limits.get("last_month", "")) != month_key:
+            limits["month_start_equity"] = float(portfolio.get("equity", self.config.starting_cash))
+            limits["last_month"] = month_key
+            events.append("monthly")
+        return events
+
+    def _update_risk_state(self, now_ts: datetime) -> None:
         portfolio = self.state.get("portfolio", {})
         cash = float(portfolio.get("cash", 0.0))
         positions = portfolio.get("positions", {}) if isinstance(portfolio.get("positions"), dict) else {}
+        prices = self.state.get("prices", {}) if isinstance(self.state.get("prices"), dict) else {}
+
         mtm = 0.0
-        for pos in positions.values():
+        for sym, pos in positions.items():
             if isinstance(pos, dict):
-                mtm += float(pos.get("qty", 0.0)) * mark_price
+                mtm += float(pos.get("qty", 0.0)) * float(prices.get(sym, pos.get("avg_price", 0.0)))
         equity = cash + mtm
         portfolio["equity"] = equity
 
+        self._apply_period_resets(now_ts)
         limits = self.state.setdefault("limits", {})
         day_start = float(limits.get("day_start_equity", equity))
         month_start = float(limits.get("month_start_equity", equity))

@@ -38,6 +38,8 @@ class TraderStorage:
                 "cooldowns": {},
             },
             "market": {},
+            "prices": {},
+            "fills": [],
             "models": {"active": None, "registry": []},
             "metrics": {
                 "decisions_total": 0,

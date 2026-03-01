@@ -1,5 +1,3 @@
-"""CLI entrypoint for independent Trader agent workflows."""
-
 from __future__ import annotations
 
 import argparse
@@ -28,6 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     live = sub.add_parser("live-demo", help="Fetch latest real market data and run one cycle")
     live.add_argument("--output", default="agents/trader/artifacts/live_demo.json", help="Output JSON path")
+
+    ledger = sub.add_parser("ledger", help="Inspect append-only event ledger")
+    ledger_sub = ledger.add_subparsers(dest="ledger_command", required=True)
+    ledger_tail = ledger_sub.add_parser("tail", help="Show last N events")
+    ledger_tail.add_argument("--limit", type=int, default=200)
+
+    ledger_query = ledger_sub.add_parser("query", help="Query events by type/symbol/time")
+    ledger_query.add_argument("--type", dest="event_type", default=None)
+    ledger_query.add_argument("--symbol", default=None)
+    ledger_query.add_argument("--since-ts", default=None)
+    ledger_query.add_argument("--limit", type=int, default=50)
 
     ui = sub.add_parser("ui", help="Run local Trader web UI server")
     ui.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
@@ -58,6 +67,25 @@ def main() -> int:
         out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps({"output": str(out), "decisions": len(result)}, ensure_ascii=False))
         return 0
+
+    if args.command == "ledger":
+        if args.ledger_command == "tail":
+            print(json.dumps(runtime.ledger.tail(args.limit), ensure_ascii=False, indent=2))
+            return 0
+        if args.ledger_command == "query":
+            print(
+                json.dumps(
+                    runtime.ledger.query(
+                        event_type=args.event_type,
+                        symbol=args.symbol,
+                        since_ts=args.since_ts,
+                        limit=args.limit,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
 
     if args.command == "ui":
         import uvicorn
