@@ -27,10 +27,15 @@ from trader_plugins.events import (
     EVENT_LEARNING_DRIFT_DETECTED,
     EVENT_LEARNING_MODEL_PROMOTED,
     EVENT_LEARNING_MODEL_ROLLED_BACK,
+    EVENT_LEARNING_PERFORMANCE_ALERT,
     EVENT_LEARNING_TRAIN_RUN_COMPLETED,
     EVENT_LEARNING_TRAIN_RUN_STARTED,
+    EVENT_METRICS_CCIF_UPDATED,
     EVENT_METRICS_UPDATED,
     EVENT_POLICY_UPDATED,
+    EVENT_POLICY_VIOLATION_ALERT,
+    EVENT_VALUE_POLICY_UPDATED,
+    EVENT_DECISION_OPTIONS_EVALUATED,
     EVENT_STATE_INTEGRATED,
     EventEnvelope,
 )
@@ -41,6 +46,7 @@ from trader_plugins.registry import ModelRegistry
 from trader_plugins.storage import TraderStorage
 from trader_plugins.types import Candle
 from trader_plugins.value_model import TraderValueModel
+from trader_plugins.value_policy import ValuePolicy, default_value_policy
 
 
 class TraderRuntime:
@@ -226,8 +232,9 @@ class TraderRuntime:
         p_win, uncertainty, model_missing = self._model_predict(features)
 
         value_scores = self.vel.evaluate(integrated, p_win)
+        value_policy = self._load_value_policy()
         previous_mode = str(self.state.get("metrics", {}).get("mode", "cautious"))
-        self._update_ccif(value_scores, data_lock)
+        self._update_ccif(value_scores, data_lock, market_event=market_event, causation_id=state_event.event_id)
         if model_missing:
             self.state.setdefault("metrics", {})["mode"] = "restricted"
         self._emit_guardrail_transition(previous_mode, str(self.state.get("metrics", {}).get("mode", "cautious")), market_event)
@@ -242,6 +249,21 @@ class TraderRuntime:
             state=self.state,
             mode=str(self.state.get("metrics", {}).get("mode", "cautious")),
             lock_entries=data_lock,
+            value_policy=value_policy,
+        )
+
+        self._emit(
+            event_type=EVENT_DECISION_OPTIONS_EVALUATED,
+            source="trader/de",
+            actor="trader/de",
+            correlation_id=market_event.correlation_id,
+            causation_id=state_event.event_id,
+            payload={
+                "symbol": symbol,
+                "decision_id": plan.decision_id,
+                "value_policy_version": plan.value_policy_version,
+                "alternatives": [asdict(option) for option in plan.alternatives],
+            },
         )
 
         decision_event = self._emit(
@@ -377,6 +399,10 @@ class TraderRuntime:
     def _emit_metrics(self, correlation_id: str, causation_id: str, reset_reason: str | None = None) -> EventEnvelope:
         payload = {
             "cci_f": self.state.get("metrics", {}).get("cci_f", 0.0),
+            "dc": self.state.get("metrics", {}).get("dc", 0.0),
+            "rs": self.state.get("metrics", {}).get("rs", 0.0),
+            "vr": self.state.get("metrics", {}).get("vr", 0.0),
+            "pa": self.state.get("metrics", {}).get("pa", 0.0),
             "dd_day": self.state.get("dd_day", 0.0),
             "dd_month": self.state.get("dd_month", 0.0),
             "trades_total_day": self.state.get("limits", {}).get("trades_total_day", 0),
@@ -428,15 +454,88 @@ class TraderRuntime:
                 return rec
         return {"model_version": active, "label_version": self.config.label_version}
 
-    def _update_ccif(self, value_scores: dict[str, object], data_lock: bool) -> None:
-        current = float(self.state.get("metrics", {}).get("cci_f", 0.8))
-        opportunity = float(value_scores.get("opportunity", 0.0))
-        risk = float(value_scores.get("risk", 1.0))
-        quality = float(value_scores.get("quality", 0.0))
-        next_ccif = max(0.0, min(1.0, 0.6 * current + 0.2 * opportunity + 0.2 * (1 - risk) * quality))
+    def _update_ccif(self, value_scores: dict[str, object], data_lock: bool, market_event: EventEnvelope, causation_id: str) -> None:
+        metrics = self.state.setdefault("metrics", {})
+        policy = self.state.get("policy", {}) if isinstance(self.state.get("policy"), dict) else {}
+        threshold = float(policy.get("dynamic_threshold", self.config.p_win_threshold))
+        p_win_avg = float(metrics.get("p_win_avg", 0.0))
+
+        decision_history = metrics.setdefault("decision_history", [])
+        if not isinstance(decision_history, list):
+            decision_history = []
+            metrics["decision_history"] = decision_history
+        entry_respecting = 1.0 if p_win_avg >= threshold else 0.0
+        decision_history.append(entry_respecting)
+        if len(decision_history) > 50:
+            del decision_history[:-50]
+
+        exposure_history = metrics.setdefault("exposure_history", [])
+        if not isinstance(exposure_history, list):
+            exposure_history = []
+            metrics["exposure_history"] = exposure_history
+        equity = float(self.state.get("portfolio", {}).get("equity", self.config.starting_cash))
+        gross_exposure = 0.0
+        positions = self.state.get("portfolio", {}).get("positions", {}) if isinstance(self.state.get("portfolio", {}).get("positions"), dict) else {}
+        prices = self.state.get("prices", {}) if isinstance(self.state.get("prices"), dict) else {}
+        for sym, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
+            gross_exposure += float(pos.get("qty", 0.0)) * float(prices.get(sym, pos.get("avg_price", 0.0)))
+        exposure_ratio = gross_exposure / max(equity, 1e-9)
+        exposure_history.append(exposure_ratio)
+        if len(exposure_history) > 50:
+            del exposure_history[:-50]
+
+        violations = int(metrics.get("policy_violations", 0))
+        if data_lock:
+            violations += 1
+        max_allowed_exposure = 1.5
+        if exposure_ratio > max_allowed_exposure:
+            violations += 1
+        metrics["policy_violations"] = violations
+
+        dc = sum(float(x) for x in decision_history) / max(len(decision_history), 1)
+        mean_exposure = sum(float(x) for x in exposure_history) / max(len(exposure_history), 1)
+        rs = max(0.0, min(1.0, 1.0 - abs(mean_exposure - min(1.0, max_allowed_exposure)) * 0.5))
+        vr = min(1.0, violations / max(len(decision_history), 1))
+        recent_outcomes = metrics.get("recent_outcomes", [])
+        pa = sum(float(x) for x in recent_outcomes) / max(len(recent_outcomes), 1) if isinstance(recent_outcomes, list) and recent_outcomes else 0.5
+
+        next_ccif = max(0.0, min(1.0, 0.35 * dc + 0.25 * rs + 0.20 * (1.0 - vr) + 0.20 * pa))
         mode = mode_from_ccif(next_ccif, locked=data_lock)
-        self.state.setdefault("metrics", {})["cci_f"] = next_ccif
-        self.state.setdefault("metrics", {})["mode"] = mode
+        metrics["cci_f"] = next_ccif
+        metrics["dc"] = dc
+        metrics["rs"] = rs
+        metrics["vr"] = vr
+        metrics["pa"] = pa
+        metrics["mode"] = mode
+
+        self._emit(
+            event_type=EVENT_METRICS_CCIF_UPDATED,
+            source="trader/runtime",
+            actor="trader/runtime",
+            correlation_id=market_event.correlation_id,
+            causation_id=causation_id,
+            payload={"cci_f": next_ccif, "dc": dc, "rs": rs, "vr": vr, "pa": pa, "mode": mode},
+        )
+        if vr > 0.20:
+            self._emit(
+                event_type=EVENT_POLICY_VIOLATION_ALERT,
+                source="trader/runtime",
+                actor="trader/runtime",
+                correlation_id=market_event.correlation_id,
+                causation_id=causation_id,
+                payload={"vr": vr, "violations": violations},
+            )
+        if pa < 0.35:
+            self._emit(
+                event_type=EVENT_LEARNING_PERFORMANCE_ALERT,
+                source="trader/runtime",
+                actor="trader/runtime",
+                correlation_id=market_event.correlation_id,
+                causation_id=causation_id,
+                payload={"pa": pa, "recent_samples": len(recent_outcomes) if isinstance(recent_outcomes, list) else 0},
+            )
 
     def _record_outcome(self, plan, event_type: str) -> None:
         if event_type != EVENT_EXECUTION_FILLED:
@@ -470,6 +569,13 @@ class TraderRuntime:
         self.state.setdefault("metrics", {})["mode"] = "restricted"
 
         self._emit(event_type=EVENT_POLICY_UPDATED, source="trader/policy", actor="trader/policy", correlation_id=correlation_id, causation_id=causation_id, payload=policy)
+        self._roll_value_policy(
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            reason="drift_guardrail",
+            quality_floor=max(0.45, float(self._load_value_policy().thresholds.min_quality)),
+            risk_ceiling=min(0.70, float(self._load_value_policy().thresholds.max_risk)),
+        )
 
         registry = ModelRegistry(self.storage.load_model_registry())
         current = registry.active()
@@ -546,7 +652,40 @@ class TraderRuntime:
         policy.setdefault("risk_per_trade", self.config.risk.risk_per_trade)
         policy.setdefault("mode", "restricted")
         self.state.setdefault("dynamic_threshold", policy["dynamic_threshold"])
+        if not isinstance(self.state.get("value_policy"), dict):
+            self.state["value_policy"] = default_value_policy().to_dict()
+        metrics = self.state.setdefault("metrics", {})
+        metrics.setdefault("dc", 0.8)
+        metrics.setdefault("rs", 0.8)
+        metrics.setdefault("vr", 0.0)
+        metrics.setdefault("pa", 0.8)
+        metrics.setdefault("decision_history", [])
+        metrics.setdefault("exposure_history", [])
         self.state.setdefault("models", {}).setdefault("active_model_version", self.state.get("models", {}).get("active"))
+
+    def _load_value_policy(self) -> ValuePolicy:
+        raw = self.state.get("value_policy")
+        if isinstance(raw, dict):
+            return ValuePolicy.from_dict(raw)
+        policy = default_value_policy()
+        self.state["value_policy"] = policy.to_dict()
+        return policy
+
+    def _roll_value_policy(self, *, correlation_id: str, causation_id: str, reason: str, quality_floor: float, risk_ceiling: float) -> None:
+        previous = self._load_value_policy()
+        serial = int(previous.value_policy_version.split("-v")[-1]) + 1 if "-v" in previous.value_policy_version and previous.value_policy_version.split("-v")[-1].isdigit() else 2
+        next_policy = default_value_policy(version=f"value-pol-v{serial}")
+        next_policy.thresholds.min_quality = round(quality_floor, 6)
+        next_policy.thresholds.max_risk = round(risk_ceiling, 6)
+        self.state["value_policy"] = next_policy.to_dict()
+        self._emit(
+            event_type=EVENT_VALUE_POLICY_UPDATED,
+            source="trader/policy",
+            actor="trader/policy",
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            payload={"reason": reason, "previous_version": previous.value_policy_version, "current": next_policy.to_dict()},
+        )
 
     def _persist(self) -> None:
         self.storage.save_runtime_state(self.state)

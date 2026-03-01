@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pce.sm.manager import StateManager
+from trader_plugins.value_policy import default_value_policy
 
 
 class TraderStorage:
@@ -42,14 +43,21 @@ class TraderStorage:
             "fills": [],
             "models": {"active": None, "active_model_version": None, "registry": []},
             "policy": {"policy_version": "pol-bootstrap", "mode": "restricted", "dynamic_threshold": 0.60, "risk_per_trade": 0.005},
+            "value_policy": default_value_policy().to_dict(),
             "metrics": {
                 "decisions_total": 0,
                 "trades_executed": 0,
                 "cci_f": 0.8,
+                "dc": 0.8,
+                "rs": 0.8,
+                "vr": 0.0,
+                "pa": 0.8,
                 "p_win_avg": 0.0,
                 "drift_flags": [],
                 "mode": "cautious",
                 "recent_outcomes": [],
+                "decision_history": [],
+                "exposure_history": [],
             },
         }
         self.save_runtime_state(state)

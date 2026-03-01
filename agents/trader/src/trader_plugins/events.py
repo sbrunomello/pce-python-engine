@@ -23,6 +23,11 @@ EVENT_LEARNING_MODEL_PROMOTED = "learning.model.promoted"
 EVENT_LEARNING_MODEL_ROLLED_BACK = "learning.model.rolled_back"
 EVENT_LEARNING_DRIFT_DETECTED = "learning.drift.detected"
 EVENT_POLICY_UPDATED = "policy.updated"
+EVENT_VALUE_POLICY_UPDATED = "value_policy.updated"
+EVENT_DECISION_OPTIONS_EVALUATED = "decision.options.evaluated"
+EVENT_METRICS_CCIF_UPDATED = "metrics.ccif.updated"
+EVENT_POLICY_VIOLATION_ALERT = "policy.violation.alert"
+EVENT_LEARNING_PERFORMANCE_ALERT = "learning.performance.alert"
 
 
 @dataclass(slots=True)
