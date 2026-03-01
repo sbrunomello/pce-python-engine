@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pce-agent-trader"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+  "pce-python-core",
+]
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["trader_plugins*", "agents.trader*"]

@@ -4,6 +4,8 @@ pythonpath = [
   "agents/rover/src",
   "agents/llm-assistant/src",
   "agents/llm-assistant",
+  "agents/trader/src",
+  "agents/trader",
   "pce-os/src",
   ".",
 ]
@@ -18,7 +20,7 @@ select = ["E", "F", "I", "B", "UP", "N", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["pce", "pce_api", "rover_plugins", "llm_assistant", "pce_os", "agents.rover"]
+packages = ["pce", "pce_api", "rover_plugins", "llm_assistant", "trader_plugins", "pce_os", "agents.rover"]
 ignore_missing_imports = true
 explicit_package_bases = true
-mypy_path = ["pce-core/src", "agents/rover/src", "agents/llm-assistant/src", "pce-os/src", "."]
+mypy_path = ["pce-core/src", "agents/rover/src", "agents/llm-assistant/src", "agents/trader/src", "pce-os/src", "."]
