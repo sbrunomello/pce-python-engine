@@ -4,6 +4,10 @@ Implementação de referência em Python da **Persistent Cognition Engine (PCE)*
 
 > **Tese central (fonte primária):** a PCE formaliza a transição de automação reativa para **deliberação persistente**, de resposta pontual para **responsabilidade estrutural**, e de otimização estatística isolada para **cognição coerente com valores explícitos e memória integrada**, com **CCI (Cognitive Coherence Index)** como métrica proprietária de coerência cognitiva.
 
+## 📘 Documentação principal
+
+Para uma visão consolidada e completa de arquitetura, fluxos e operação do projeto atual, consulte: **`docs/DOCUMENTACAO_PRINCIPAL.md`**.
+
 ## 1) Visão executiva
 
 Sistemas baseados apenas em inferência reativa tendem a:
