@@ -122,6 +122,7 @@ def main() -> int:
         import uvicorn
         from ui_server import create_app
 
+        print(f"PCE Observability Console: http://{args.host}:{args.port}")
         uvicorn.run(create_app(loop_interval_s=args.loop_interval), host=args.host, port=args.port)
         return 0
 

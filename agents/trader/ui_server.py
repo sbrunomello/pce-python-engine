@@ -1,8 +1,4 @@
-"""FastAPI UI server for the Trader runtime.
-
-This module intentionally stays self-contained inside ``agents/trader`` so the
-web UI can run independently from pce-os.
-"""
+"""FastAPI UI server for Trader end-to-end observability (Sprint 3.5)."""
 
 from __future__ import annotations
 
@@ -10,172 +6,219 @@ import argparse
 import asyncio
 import json
 import os
-import uuid
+from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from trader_plugins.config import TraderConfig
+from trader_plugins.events import EventEnvelope
 from trader_plugins.runtime import TraderRuntime, _fetch_latest_binance_candle
 from trader_plugins.types import Candle
 
-UI_VERSION = "0.1.0"
+UI_VERSION = "0.3.5"
 ROOT = Path(__file__).resolve().parent
 UI_DIR = ROOT / "ui"
-ARTIFACTS_DIR = ROOT / "artifacts"
-LOGS_PATH = ARTIFACTS_DIR / "logs" / "decisions.jsonl"
-UI_CACHE_PATH = ARTIFACTS_DIR / "ui_cache.json"
+
+
+_STAGE_ORDER = ["EPL", "ISI", "VEL", "SM", "DE", "AO", "AFS"]
+
+
+def _event_stage(event_type: str) -> str:
+    if event_type.startswith("market."):
+        return "EPL"
+    if event_type.startswith("state."):
+        return "ISI"
+    if event_type.startswith("metrics.ccif"):
+        return "VEL"
+    if event_type.startswith("metrics.") or event_type.startswith("guardrail."):
+        return "SM"
+    if event_type.startswith("decision."):
+        return "DE"
+    if event_type.startswith("execution."):
+        return "AO"
+    if event_type.startswith("learning.") or event_type.startswith("policy.") or event_type.startswith("value_policy."):
+        return "AFS"
+    return "AFS"
 
 
 class EventHub:
-    """Track connected websocket clients and broadcast JSON events."""
+    """WebSocket fanout hub with per-client subscriptions and ledger backfill."""
 
-    def __init__(self) -> None:
-        self._clients: set[WebSocket] = set()
+    def __init__(self, runtime: TraderRuntime) -> None:
+        self.runtime = runtime
+        self._clients: dict[WebSocket, dict[str, Any]] = {}
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
-        self._clients.add(websocket)
+        self._clients[websocket] = {"filters": {}}
 
     def disconnect(self, websocket: WebSocket) -> None:
-        self._clients.discard(websocket)
+        self._clients.pop(websocket, None)
 
-    async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        message = {"type": event_type, "payload": payload, "ts": datetime.now(UTC).isoformat()}
+    async def on_client_message(self, websocket: WebSocket, message: dict[str, Any]) -> None:
+        msg_type = str(message.get("type", "")).lower()
+        if msg_type == "subscribe":
+            filters = message.get("filters") if isinstance(message.get("filters"), dict) else {}
+            self._clients.setdefault(websocket, {})["filters"] = filters
+            await websocket.send_json({"type": "ack", "op": "subscribe", "filters": filters})
+            return
+        if msg_type == "backfill":
+            limit = int(message.get("limit", 200))
+            limit = max(1, min(limit, 5000))
+            for item in self.runtime.ledger.tail(limit):
+                if self._matches_filters(item, self._clients.get(websocket, {}).get("filters", {})):
+                    await websocket.send_json({"type": "event", "envelope": item})
+            await websocket.send_json({"type": "ack", "op": "backfill", "limit": limit})
+
+    def _matches_filters(self, envelope: dict[str, Any], filters: dict[str, Any]) -> bool:
+        evt = filters.get("type")
+        sym = filters.get("symbol")
+        cid = filters.get("correlation_id")
+        payload = envelope.get("payload", {}) if isinstance(envelope.get("payload"), dict) else {}
+        if evt and envelope.get("event_type") != evt:
+            return False
+        if sym and payload.get("symbol") != sym:
+            return False
+        if cid and envelope.get("correlation_id") != cid:
+            return False
+        return True
+
+    async def broadcast(self, envelope: EventEnvelope | dict[str, Any]) -> None:
+        data = envelope.to_dict() if isinstance(envelope, EventEnvelope) else envelope
         dead: list[WebSocket] = []
-        for client in self._clients:
+        for ws, meta in list(self._clients.items()):
             try:
-                await client.send_json(message)
+                if self._matches_filters(data, meta.get("filters", {})):
+                    await ws.send_json({"type": "event", "envelope": data})
             except Exception:
-                dead.append(client)
+                dead.append(ws)
         for ws in dead:
-            self._clients.discard(ws)
+            self.disconnect(ws)
 
 
 class RuntimeController:
-    """Holds runtime state and control-loop semantics for UI endpoints."""
+    """Owns runtime singleton + live/replay control loops."""
 
-    def __init__(self, runtime: TraderRuntime, *, use_binance: bool, loop_interval_s: float) -> None:
-        self.runtime = runtime
+    def __init__(self, *, use_binance: bool, loop_interval_s: float) -> None:
         self.use_binance = use_binance
         self.loop_interval_s = loop_interval_s
+        self.runtime: TraderRuntime | None = None
+        self.event_hub: EventHub | None = None
         self.runtime_running = False
         self.decisions_paused = False
+        self.mode = "idle"
         self._task: asyncio.Task[None] | None = None
-        self.event_hub = EventHub()
-        self.policy_version = 1
-        self.train_runs: dict[str, dict[str, Any]] = {}
+        self._init_runtime()
 
-    async def start(self) -> None:
+    def _observer(self, envelope: EventEnvelope) -> None:
+        if self.event_hub is None:
+            return
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.event_hub.broadcast(envelope))
+
+    def _init_runtime(self) -> None:
+        runtime = TraderRuntime(TraderConfig(), observer=self._observer)
+        self.runtime = runtime
+        self.event_hub = EventHub(runtime)
+
+    async def start(self, payload: dict[str, Any]) -> None:
         if self.runtime_running:
             return
+        self.mode = str(payload.get("mode", "live"))
         self.runtime_running = True
-        self._task = asyncio.create_task(self._run_loop())
+        interval = float(payload.get("interval_sec", self.loop_interval_s))
+        symbols = payload.get("symbols")
+        if isinstance(symbols, list) and symbols:
+            self.runtime.config.symbols = [str(s).upper() for s in symbols]
+
+        if self.mode == "replay":
+            replay_csv = payload.get("replay_csv")
+            if not replay_csv:
+                raise HTTPException(status_code=400, detail="replay_csv is required for replay mode")
+            self._task = asyncio.create_task(self._run_replay(Path(str(replay_csv)), interval))
+        else:
+            self._task = asyncio.create_task(self._run_live(interval))
 
     async def stop(self) -> None:
         self.runtime_running = False
-        if self._task:
+        if self._task is not None:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
             self._task = None
+        self.mode = "idle"
 
-    def pause(self) -> None:
-        self.decisions_paused = True
-
-    def resume(self) -> None:
-        self.decisions_paused = False
-
-    async def reset(self) -> None:
+    async def reset_demo(self) -> None:
         await self.stop()
-        self.runtime = TraderRuntime(self.runtime.config)
-        self.policy_version = 1
-        self._save_ui_cache({"last_reset": datetime.now(UTC).isoformat()})
+        self._init_runtime()
 
-    async def _run_loop(self) -> None:
-        while self.runtime_running:
-            try:
-                await self._tick_once()
-            except Exception as exc:  # noqa: BLE001
-                await self.event_hub.emit("log", {"level": "error", "message": f"loop error: {exc}"})
-            await asyncio.sleep(self.loop_interval_s)
-
-    async def _tick_once(self) -> None:
-        symbols = list(self.runtime.config.symbols)
-        timeframes = [self.runtime.config.execution_timeframe, self.runtime.config.macro_timeframe]
-        for symbol in symbols:
-            for timeframe in timeframes:
-                candle = self._load_candle(symbol, timeframe)
-                if candle is None:
+    async def _run_replay(self, csv_path: Path, interval_sec: float) -> None:
+        self.mode = "replay"
+        with csv_path.open("r", encoding="utf-8") as handle:
+            header = [x.strip() for x in handle.readline().strip().split(",")]
+            for raw in handle:
+                if not self.runtime_running:
+                    break
+                row = dict(zip(header, raw.strip().split(","), strict=False))
+                if not row.get("symbol"):
                     continue
-                if self.decisions_paused and timeframe == self.runtime.config.execution_timeframe:
-                    event = self.runtime.epl.ingest(candle)
-                    integrated = self.runtime.isi.integrate(event)
-                    self.runtime.state.setdefault("market", {}).setdefault(symbol, {})[timeframe] = integrated
-                    self.runtime.storage.save_runtime_state(self.runtime.state)
-                else:
-                    decision = self.runtime.on_candle(candle)
-                    if decision:
-                        await self.event_hub.emit("decision", decision)
-                        await self.event_hub.emit("execution", decision.get("execution", {}))
-                market = self.runtime.state.get("market", {}).get(symbol, {}).get(timeframe, {})
-                await self.event_hub.emit("candle", {"symbol": symbol, "timeframe": timeframe, "market": market})
+                candle = Candle(
+                    symbol=str(row["symbol"]),
+                    timeframe=str(row["timeframe"]),
+                    timestamp=datetime.fromisoformat(str(row["timestamp"])),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row["volume"]),
+                )
+                self.runtime.on_candle(candle)
+                await asyncio.sleep(max(interval_sec, 0.0))
+        self.runtime_running = False
+        self.mode = "idle"
 
-        await self.event_hub.emit("metrics", self.runtime.state.get("metrics", {}))
+    async def _run_live(self, interval_sec: float) -> None:
+        self.mode = "live"
+        while self.runtime_running:
+            for symbol in self.runtime.config.symbols:
+                for timeframe in [self.runtime.config.execution_timeframe, self.runtime.config.macro_timeframe]:
+                    candle = self._load_candle(symbol, timeframe)
+                    if candle is None:
+                        continue
+                    if self.decisions_paused and timeframe == self.runtime.config.execution_timeframe:
+                        self.runtime.epl.ingest(candle)
+                    else:
+                        self.runtime.on_candle(candle)
+            await asyncio.sleep(max(interval_sec, 0.1))
 
     def _load_candle(self, symbol: str, timeframe: str) -> Candle | None:
         if self.use_binance:
             candle = _fetch_latest_binance_candle(symbol, timeframe)
             if candle is not None:
                 return candle
-        # Offline fallback: deterministic pseudo-candle from current state.
         market = self.runtime.state.get("market", {}).get(symbol, {}).get(timeframe, {})
         last_close = float(market.get("features", {}).get("last_close", 100.0))
         close = max(1.0, last_close * 1.0005)
         now = datetime.now(UTC)
-        return Candle(
-            symbol=symbol,
-            timeframe=timeframe,
-            timestamp=now,
-            open=last_close,
-            high=close * 1.001,
-            low=close * 0.999,
-            close=close,
-            volume=1000.0,
-        )
-
-    def _save_ui_cache(self, payload: dict[str, Any]) -> None:
-        UI_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        UI_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return Candle(symbol=symbol, timeframe=timeframe, timestamp=now, open=last_close, high=close * 1.001, low=close * 0.999, close=close, volume=1000.0)
 
 
-def create_app(*, use_binance: bool | None = None, loop_interval_s: float = 5.0) -> FastAPI:
-    config = TraderConfig()
-    runtime = TraderRuntime(config)
-    controller = RuntimeController(
-        runtime,
-        use_binance=(os.getenv("TRADER_UI_DISABLE_BINANCE", "0") != "1") if use_binance is None else use_binance,
-        loop_interval_s=loop_interval_s,
-    )
+def create_app(*, use_binance: bool | None = None, loop_interval_s: float = 2.0) -> FastAPI:
+    controller = RuntimeController(use_binance=(os.getenv("TRADER_UI_DISABLE_BINANCE", "0") != "1") if use_binance is None else use_binance, loop_interval_s=loop_interval_s)
 
-    app = FastAPI(title="Trader UI Server", version=UI_VERSION)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    app = FastAPI(title="PCE Observability Console", version=UI_VERSION)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
     app.state.controller = controller
 
-    UI_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
 
     @app.get("/")
@@ -184,279 +227,253 @@ def create_app(*, use_binance: bool | None = None, loop_interval_s: float = 5.0)
 
     @app.on_event("shutdown")
     async def _shutdown_runtime() -> None:
-        # Ensure control loop tasks are always cancelled on app shutdown/tests.
         await controller.stop()
-
 
     @app.get("/api/health")
     async def api_health() -> dict[str, Any]:
+        state = controller.runtime.state
         return {
             "status": "ok",
-            "time": datetime.now(UTC).isoformat(),
+            "now": datetime.now(UTC).isoformat(),
             "runtime_running": controller.runtime_running,
+            "ledger_ok": controller.runtime.ledger.path.exists() or True,
             "db_ok": True,
-            "model_active": bool(controller.runtime.state.get("models", {}).get("active")),
             "ui_version": UI_VERSION,
+            "active_model_version": state.get("models", {}).get("active_model_version") or state.get("models", {}).get("active"),
+            "policy_version": state.get("policy", {}).get("policy_version"),
+            "value_policy_version": state.get("value_policy", {}).get("value_policy_version"),
+        }
+
+    @app.get("/api/ledger/tail")
+    async def api_ledger_tail(limit: int = Query(default=500, ge=1, le=5000)) -> list[dict[str, Any]]:
+        return controller.runtime.ledger.tail(limit)
+
+    @app.get("/api/ledger/query")
+    async def api_ledger_query(
+        type: str | None = None,
+        symbol: str | None = None,
+        correlation_id: str | None = None,
+        since: str | None = None,
+        limit: int = Query(default=200, ge=1, le=5000),
+    ) -> list[dict[str, Any]]:
+        events = controller.runtime.ledger.query(event_type=type, symbol=symbol, since_ts=since, limit=None)
+        if correlation_id:
+            events = [e for e in events if e.get("correlation_id") == correlation_id]
+        return events[-limit:]
+
+    @app.get("/api/trace/{correlation_id}")
+    async def api_trace(correlation_id: str) -> dict[str, Any]:
+        events = controller.runtime.ledger.query(limit=None)
+        chain = [e for e in events if e.get("correlation_id") == correlation_id]
+        chain.sort(key=lambda x: (str(x.get("ts", "")), str(x.get("event_id", ""))))
+        if not chain:
+            raise HTTPException(status_code=404, detail="correlation_id not found")
+
+        grouped: dict[str, list[dict[str, Any]]] = {stage: [] for stage in _STAGE_ORDER}
+        for e in chain:
+            grouped[_event_stage(str(e.get("event_type", "")))].append(e)
+
+        durations: dict[str, float] = {}
+        for stage in _STAGE_ORDER:
+            items = grouped[stage]
+            if len(items) >= 2:
+                t0 = datetime.fromisoformat(str(items[0]["ts"]))
+                t1 = datetime.fromisoformat(str(items[-1]["ts"]))
+                durations[stage] = (t1 - t0).total_seconds()
+            elif items:
+                durations[stage] = 0.0
+
+        versions = {
+            "model_version": controller.runtime.state.get("models", {}).get("active_model_version") or controller.runtime.state.get("models", {}).get("active"),
+            "policy_version": controller.runtime.state.get("policy", {}).get("policy_version"),
+            "value_policy_version": controller.runtime.state.get("value_policy", {}).get("value_policy_version"),
+            "feature_version": controller.runtime.config.feature_version,
+            "label_version": controller.runtime.config.label_version,
+        }
+        return {
+            "correlation_id": correlation_id,
+            "events": chain,
+            "stages": {
+                "EPL events": grouped["EPL"],
+                "ISI events": grouped["ISI"],
+                "VEL events": grouped["VEL"],
+                "SM events": grouped["SM"],
+                "DE events": grouped["DE"],
+                "AO events": grouped["AO"],
+                "AFS events": grouped["AFS"],
+            },
+            "durations_by_stage_sec": durations,
+            "causality_chain": [
+                {"event_id": e.get("event_id"), "causation_id": e.get("causation_id"), "event_type": e.get("event_type")} for e in chain
+            ],
+            "versions": versions,
         }
 
     @app.get("/api/state")
     async def api_state() -> dict[str, Any]:
-        state = controller.runtime.state
-        data_quality = {
-            "integrity_ok": True,
-            "issues": [],
-        }
-        market_state = state.get("market", {})
-        for symbol in market_state.values():
-            if isinstance(symbol, dict):
-                for tf_data in symbol.values():
-                    if isinstance(tf_data, dict):
-                        feats = tf_data.get("features", {})
-                        if isinstance(feats, dict) and not bool(feats.get("integrity_ok", True)):
-                            data_quality["integrity_ok"] = False
-                            data_quality["issues"].append({"message": "integrity flag false", "ts": datetime.now(UTC).isoformat()})
+        st = controller.runtime.state
         return {
-            "market_state": market_state,
-            "portfolio_state": state.get("portfolio", {}),
-            "limits": state.get("limits", {}),
-            "metrics": state.get("metrics", {}),
-            "data_quality": data_quality,
-            "policy_version": controller.policy_version,
+            "market_state": st.get("market", {}),
+            "portfolio_state": st.get("portfolio", {}),
+            "guardrails": {
+                "dd_day": st.get("dd_day", 0.0),
+                "dd_month": st.get("dd_month", 0.0),
+                "trades_total_day": st.get("limits", {}).get("trades_total_day", 0),
+                "by_asset": st.get("limits", {}).get("trades_by_asset_day", {}),
+                "locked": str(st.get("metrics", {}).get("mode", "")) == "locked",
+                "lock_reason": "data_lock" if str(st.get("metrics", {}).get("mode", "")) == "locked" else None,
+            },
+            "metrics": st.get("metrics", {}),
+            "registry": controller.runtime.storage.load_model_registry(),
+            "last_prices_by_symbol": st.get("prices", {}),
+            "model_info": st.get("models", {}),
         }
 
     @app.get("/api/decisions")
-    async def api_decisions(limit: int = Query(default=200, ge=1, le=1000)) -> list[dict[str, Any]]:
-        return _read_decisions(limit)
+    async def api_decisions(limit: int = Query(default=200, ge=1, le=2000)) -> list[dict[str, Any]]:
+        rows = controller.runtime.ledger.query(event_type="decision.trade_plan.created", limit=limit)
+        out: list[dict[str, Any]] = []
+        for e in reversed(rows):
+            plan = e.get("payload", {}).get("plan", {})
+            out.append(
+                {
+                    "ts": e.get("ts"),
+                    "symbol": e.get("payload", {}).get("symbol"),
+                    "action": plan.get("action"),
+                    "qty": plan.get("qty"),
+                    "p_win": plan.get("p_win"),
+                    "uncertainty": plan.get("uncertainty"),
+                    "threshold": plan.get("threshold"),
+                    "mode": plan.get("mode"),
+                    "cci_f": controller.runtime.state.get("metrics", {}).get("cci_f"),
+                    "model_version": controller.runtime.state.get("models", {}).get("active_model_version"),
+                    "decision_id": plan.get("decision_id"),
+                    "correlation_id": e.get("correlation_id"),
+                    "gate_results": plan.get("gate_results", []),
+                    "alternatives": plan.get("alternatives", []),
+                    "explanation": plan.get("reason"),
+                }
+            )
+        return out
 
-    @app.get("/api/trades")
-    async def api_trades(limit: int = Query(default=200, ge=1, le=1000)) -> list[dict[str, Any]]:
-        trades: list[dict[str, Any]] = []
-        for item in _read_decisions(limit):
-            execution = item.get("execution", {})
-            if execution.get("event_type") == "execution.fill" or execution.get("side"):
-                trades.append(
-                    {
-                        "trade_id": execution.get("fill_id", item.get("decision_id")),
-                        "decision_id": item.get("decision_id"),
-                        "timestamp": execution.get("timestamp", item.get("timestamp")),
-                        "symbol": item.get("symbol"),
-                        "side": execution.get("side", "unknown"),
-                        "qty": execution.get("qty", 0),
-                        "price": execution.get("price", 0),
-                        "pnl": execution.get("realized_pnl", 0.0),
-                    }
-                )
-        return trades
-
-    @app.get("/api/portfolio")
-    async def api_portfolio() -> dict[str, Any]:
-        portfolio = controller.runtime.state.get("portfolio", {})
-        positions = portfolio.get("positions", {})
-        exposure = {
-            symbol: float(pos.get("qty", 0.0)) * float(pos.get("avg_price", 0.0))
-            for symbol, pos in positions.items()
-            if isinstance(pos, dict)
-        }
-        equity_curve = _load_mock_equity_curve(float(portfolio.get("equity", 100000.0)))
-        return {
-            "positions": positions,
-            "exposure_by_symbol": exposure,
-            "equity_curve": equity_curve,
-            "mock": True,
-        }
+    @app.get("/api/executions")
+    async def api_executions(limit: int = Query(default=200, ge=1, le=2000)) -> list[dict[str, Any]]:
+        rows = controller.runtime.ledger.query(event_type="execution.order.filled", limit=limit)
+        return list(reversed(rows))
 
     @app.get("/api/models")
     async def api_models() -> dict[str, Any]:
-        state = controller.runtime.state
-        registry = controller.runtime.storage.load_model_registry()
         return {
-            "active_model_version": state.get("models", {}).get("active"),
-            "model_registry": registry,
-            "last_train_run": _last_train_run(controller.train_runs),
+            "active_model": controller.runtime.state.get("models", {}).get("active_model_version") or controller.runtime.state.get("models", {}).get("active"),
+            "registry": controller.runtime.storage.load_model_registry(),
+            "mock": False,
         }
 
-    @app.post("/api/train")
-    async def api_train(payload: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
-        mode = payload.get("mode", "from_features")
-        if mode not in {"from_features", "from_candles"}:
-            raise HTTPException(status_code=400, detail="invalid mode")
-        run_id = f"train-{uuid.uuid4().hex[:12]}"
-        controller.train_runs[run_id] = {
-            "state": "queued",
-            "metrics": {},
-            "logs": ["queued"],
-            "started_at": datetime.now(UTC).isoformat(),
-            "mock": mode == "from_candles",
+    @app.get("/api/policies")
+    async def api_policies() -> dict[str, Any]:
+        return {
+            "policy": controller.runtime.state.get("policy", {}),
+            "value_policy": controller.runtime.state.get("value_policy", {}),
+            "history": {"mock": True, "note": "MOCK: versioned history pending"},
         }
-
-        async def _train_task() -> None:
-            run = controller.train_runs[run_id]
-            run["state"] = "running"
-            run["logs"].append("running")
-            try:
-                csv_path = payload.get("csv_path") or "agents/trader/data/sample_features.csv"
-                result = controller.runtime.train_from_csv(Path(csv_path))
-                run["state"] = "done"
-                run["metrics"] = result
-                run["logs"].append("done")
-            except Exception as exc:  # noqa: BLE001
-                run["state"] = "error"
-                run["logs"].append(str(exc))
-
-        background_tasks.add_task(_train_task)
-        return {"accepted": True, "run_id": run_id}
-
-    @app.get("/api/train/status")
-    async def api_train_status(run_id: str) -> dict[str, Any]:
-        run = controller.train_runs.get(run_id)
-        if not run:
-            raise HTTPException(status_code=404, detail="run_id not found")
-        return run
 
     @app.post("/api/control/start")
-    async def api_control_start() -> dict[str, Any]:
-        await controller.start()
-        return {"ok": True, "runtime_running": controller.runtime_running}
+    async def api_control_start(payload: dict[str, Any]) -> dict[str, Any]:
+        await controller.start(payload)
+        return {"ok": True, "runtime_running": controller.runtime_running, "mode": controller.mode}
 
     @app.post("/api/control/stop")
     async def api_control_stop() -> dict[str, Any]:
         await controller.stop()
         return {"ok": True, "runtime_running": controller.runtime_running}
 
-    @app.post("/api/control/pause")
-    async def api_control_pause() -> dict[str, Any]:
-        controller.pause()
+    @app.post("/api/control/pause_decisions")
+    async def api_pause_decisions() -> dict[str, Any]:
+        controller.decisions_paused = True
         return {"ok": True, "paused": True}
 
-    @app.post("/api/control/resume")
-    async def api_control_resume() -> dict[str, Any]:
-        controller.resume()
+    @app.post("/api/control/resume_decisions")
+    async def api_resume_decisions() -> dict[str, Any]:
+        controller.decisions_paused = False
         return {"ok": True, "paused": False}
 
-    @app.post("/api/control/reset")
-    async def api_control_reset(payload: dict[str, Any]) -> dict[str, Any]:
+    @app.post("/api/control/reset_demo")
+    async def api_reset(payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("confirm") is not True:
             raise HTTPException(status_code=400, detail="confirm=true required")
-        await controller.reset()
-        return {"ok": True, "runtime_running": controller.runtime_running}
+        await controller.reset_demo()
+        return {"ok": True}
 
-    @app.post("/api/control/config")
-    async def api_control_config(payload: dict[str, Any]) -> dict[str, Any]:
-        threshold = payload.get("threshold")
-        if threshold is not None:
-            threshold = float(threshold)
-            if threshold < 0.50 or threshold > 0.80:
-                raise HTTPException(status_code=400, detail="threshold out of range")
-            controller.runtime.config.p_win_threshold = threshold
+    @app.post("/api/control/train")
+    async def api_control_train(payload: dict[str, Any]) -> dict[str, Any]:
+        mode = str(payload.get("mode", "dataset"))
+        dataset = payload.get("dataset_path") or payload.get("candles_csv") or "agents/trader/data/sample_features.csv"
+        if mode not in {"dataset", "candles"}:
+            raise HTTPException(status_code=400, detail="invalid mode")
+        result = controller.runtime.train_from_csv(Path(str(dataset)))
+        return {"ok": True, "mode": mode, "result": result}
 
-        symbols = payload.get("symbols")
-        if symbols is not None:
-            if not isinstance(symbols, list) or not symbols or len(symbols) > 20:
-                raise HTTPException(status_code=400, detail="invalid symbols")
-            controller.runtime.config.symbols = [str(s).upper() for s in symbols]
+    @app.post("/api/control/set_policy")
+    async def api_set_policy(payload: dict[str, Any]) -> dict[str, Any]:
+        policy = controller.runtime.state.setdefault("policy", {})
+        if "p_win_threshold" in payload:
+            v = float(payload["p_win_threshold"])
+            if not (0.0 <= v <= 1.0):
+                raise HTTPException(status_code=400, detail="p_win_threshold out of range")
+            controller.runtime.config.p_win_threshold = v
+            policy["dynamic_threshold"] = v
+        if "risk_per_trade" in payload:
+            v = float(payload["risk_per_trade"])
+            if not (0.0 <= v <= 0.2):
+                raise HTTPException(status_code=400, detail="risk_per_trade out of range")
+            policy["risk_per_trade"] = v
+        if "max_trades_per_day" in payload:
+            v = int(payload["max_trades_per_day"])
+            if not (1 <= v <= 1000):
+                raise HTTPException(status_code=400, detail="max_trades_per_day out of range")
+            controller.runtime.config.risk.max_trades_per_day = v
+        policy["policy_version"] = f"policy-ui-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        controller.runtime._emit(event_type="policy.updated", source="trader/ui", actor="trader/ui", correlation_id=f"policy-{datetime.now(UTC).timestamp()}", payload={"policy": policy})
+        return {"ok": True, "policy": policy}
 
-        for key in ("fee_bps", "slippage_bps"):
-            if key in payload:
-                value = float(payload[key])
-                if value < 0 or value > 100:
-                    raise HTTPException(status_code=400, detail=f"{key} out of range")
-                setattr(controller.runtime.config, key, value)
-
-        risk_limits = payload.get("risk_limits")
-        if isinstance(risk_limits, dict):
-            for r_key in ("max_trades_per_day", "max_trades_per_asset_day"):
-                if r_key in risk_limits:
-                    val = int(risk_limits[r_key])
-                    if val < 1 or val > 100:
-                        raise HTTPException(status_code=400, detail=f"{r_key} out of range")
-                    setattr(controller.runtime.config.risk, r_key, val)
-
-        controller.policy_version += 1
-        controller.runtime.state["policy_version"] = controller.policy_version
-        controller.runtime.storage.save_runtime_state(controller.runtime.state)
-        return {"ok": True, "policy_version": controller.policy_version}
+    @app.post("/api/control/set_value_policy")
+    async def api_set_value_policy(payload: dict[str, Any]) -> dict[str, Any]:
+        vp = controller.runtime.state.setdefault("value_policy", {})
+        for k, v in payload.items():
+            if isinstance(v, (int, float)):
+                if not (-10.0 <= float(v) <= 10.0):
+                    raise HTTPException(status_code=400, detail=f"{k} out of range")
+                vp[k] = float(v)
+            else:
+                vp[k] = v
+        vp["value_policy_version"] = f"value-ui-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        controller.runtime._emit(event_type="value_policy.updated", source="trader/ui", actor="trader/ui", correlation_id=f"value-policy-{datetime.now(UTC).timestamp()}", payload={"value_policy": vp})
+        return {"ok": True, "value_policy": vp}
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket) -> None:
         await controller.event_hub.connect(websocket)
         try:
-            await websocket.send_json({"type": "log", "payload": {"message": "connected"}, "ts": datetime.now(UTC).isoformat()})
-            await websocket.send_json({"type": "metrics", "payload": controller.runtime.state.get("metrics", {}), "ts": datetime.now(UTC).isoformat()})
+            await websocket.send_json({"type": "hello", "ui_version": UI_VERSION})
             while True:
-                # Keep the socket alive. Client messages are ignored in v0.
-                await websocket.receive_text()
+                data = await websocket.receive_json()
+                if isinstance(data, dict):
+                    await controller.event_hub.on_client_message(websocket, data)
         except WebSocketDisconnect:
             controller.event_hub.disconnect(websocket)
 
-    @app.get("/api/download/decisions")
-    async def download_decisions() -> JSONResponse:
-        return JSONResponse(content=_read_decisions(limit=2000))
-
-    @app.get("/api/download/state")
-    async def download_state() -> JSONResponse:
-        return JSONResponse(content=controller.runtime.state)
+    @app.get("/api/download/ledger_tail")
+    async def api_download_ledger_tail(limit: int = Query(default=2000, ge=1, le=10000)) -> JSONResponse:
+        return JSONResponse(content=controller.runtime.ledger.tail(limit))
 
     return app
-
-
-def _read_decisions(limit: int) -> list[dict[str, Any]]:
-    if not LOGS_PATH.exists():
-        return []
-    lines = LOGS_PATH.read_text(encoding="utf-8").splitlines()[-limit:]
-    items: list[dict[str, Any]] = []
-    for line in reversed(lines):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        plan = row.get("plan", {}) if isinstance(row.get("plan"), dict) else {}
-        explanation = row.get("explanation", {}) if isinstance(row.get("explanation"), dict) else {}
-        items.append(
-            {
-                "decision_id": row.get("decision_id"),
-                "timestamp": plan.get("timestamp", row.get("ts")),
-                "symbol": row.get("symbol"),
-                "p_win": plan.get("model_out", {}).get("p_win"),
-                "uncertainty": plan.get("model_out", {}).get("uncertainty"),
-                "threshold": plan.get("threshold"),
-                "mode": plan.get("mode"),
-                "gate_results": plan.get("gate_results"),
-                "action": plan.get("action"),
-                "qty": plan.get("qty"),
-                "explanation": explanation,
-                "execution": row.get("execution", {}),
-                "raw": row,
-            }
-        )
-    return items
-
-
-def _load_mock_equity_curve(latest: float) -> list[dict[str, Any]]:
-    now = datetime.now(UTC)
-    curve = []
-    for idx in range(20):
-        curve.append(
-            {
-                "ts": (now).isoformat(),
-                "equity": latest * (0.99 + (idx / 1000.0)),
-                "mock": True,
-            }
-        )
-    return curve
-
-
-def _last_train_run(runs: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    if not runs:
-        return {"mock": True, "state": "none", "logs": ["no training run yet"]}
-    run_id = sorted(runs.keys())[-1]
-    return {"run_id": run_id, **runs[run_id]}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Trader UI server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--loop-interval", type=float, default=5.0)
+    parser.add_argument("--loop-interval", type=float, default=2.0)
     args = parser.parse_args()
 
     import uvicorn
