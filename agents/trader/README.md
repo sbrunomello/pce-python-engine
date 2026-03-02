@@ -122,6 +122,9 @@ Cadeia causal obrigatória:
 - Modelos: `agents/trader/artifacts/model-*.json`
 - Datasets: caminho escolhido em `dataset build` (CSV local; sem commit de datasets grandes)
 
+## Guia E2E detalhado
+Para subir e validar o trader ponta a ponta, consulte `agents/trader/END_TO_END.md`.
+
 ## Limitações
 - Ainda é demo: **sem corretora real**.
 - LLM segue como camada de expressão (explicabilidade), não decide trade.
