@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -52,7 +52,7 @@ from trader_plugins.value_policy import ValuePolicy, default_value_policy
 class TraderRuntime:
     """Independent runtime for demo trading with mock execution."""
 
-    def __init__(self, config: TraderConfig | None = None) -> None:
+    def __init__(self, config: TraderConfig | None = None, observer: Callable[[EventEnvelope], None] | None = None) -> None:
         self.config = config or TraderConfig()
         self.config.logs_dir.mkdir(parents=True, exist_ok=True)
         self.storage = TraderStorage(self.config.db_url)
@@ -65,6 +65,7 @@ class TraderRuntime:
         self.ao = MockBroker(self.config)
         self.afs = TraderAFS(self.config)
         self.expression = TraderExpressionLayer()
+        self._observer = observer
         self._ensure_state_defaults()
         self._active_model_meta = self._load_active_model_meta()
         self._active_model = self._load_active_model()
@@ -186,7 +187,7 @@ class TraderRuntime:
 
     def on_candle(self, candle: Candle) -> dict[str, Any] | None:
         market_event = self.epl.ingest(candle)
-        self.ledger.append(market_event)
+        self._publish(market_event)
         integrated = self.isi.integrate(market_event)
         symbol = integrated["symbol"]
         timeframe = integrated["timeframe"]
@@ -393,8 +394,14 @@ class TraderRuntime:
 
     def _emit(self, *, event_type: str, source: str, correlation_id: str, payload: dict[str, Any], causation_id: str | None = None, actor: str | None = None) -> EventEnvelope:
         env = EventEnvelope(event_type=event_type, source=source, payload=payload, correlation_id=correlation_id, causation_id=causation_id, actor=actor)
-        self.ledger.append(env)
+        self._publish(env)
         return env
+
+    def _publish(self, envelope: EventEnvelope) -> None:
+        """Persist envelope into ledger and notify optional observer hook."""
+        self.ledger.append(envelope)
+        if self._observer is not None:
+            self._observer(envelope)
 
     def _emit_metrics(self, correlation_id: str, causation_id: str, reset_reason: str | None = None) -> EventEnvelope:
         payload = {

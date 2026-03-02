@@ -130,3 +130,51 @@ Cadeia causal obrigatória:
 ```bash
 pytest agents/trader/tests -q
 ```
+
+## Sprint 3.5 - PCE Observability Console (Web UI)
+
+### Subir UI local
+```bash
+python agents/trader/cli.py ui --port 8787
+```
+Bind padrão: `127.0.0.1`.
+
+### Endpoints principais
+- `GET /api/health`
+- `GET /api/ledger/tail?limit=500`
+- `GET /api/ledger/query?type=&symbol=&correlation_id=&since=&limit=`
+- `GET /api/trace/{correlation_id}`
+- `GET /api/state`
+- `GET /api/decisions?limit=200`
+- `GET /api/executions?limit=200`
+- `GET /api/models`
+- `GET /api/policies`
+- `POST /api/control/start`
+- `POST /api/control/stop`
+- `POST /api/control/pause_decisions`
+- `POST /api/control/resume_decisions`
+- `POST /api/control/reset_demo`
+- `POST /api/control/train`
+- `POST /api/control/set_policy`
+- `POST /api/control/set_value_policy`
+- `WS /ws/events`
+
+### Trace Explorer
+1. Abra a aba **Live Event Stream** para identificar `correlation_id`.
+2. Abra **Trace Explorer** e cole o `correlation_id`.
+3. A tela mostra waterfall por estágio EPL→ISI→VEL→SM→DE→AO→AFS, durations e cadeia causal.
+
+### Replay visual
+1. Prepare CSV local no backend (`symbol,timeframe,timestamp,open,high,low,close,volume`).
+2. Inicie replay:
+```bash
+curl -X POST http://127.0.0.1:8787/api/control/start \
+  -H 'content-type: application/json' \
+  -d '{"mode":"replay","replay_csv":"agents/trader/data/sample_candles.csv","interval_sec":0.2}'
+```
+3. Acompanhe stream em tempo real via WS na UI.
+
+### Troubleshooting
+- Sem internet/market data: runtime usa fallback determinístico de candle local.
+- Sem LLM: não quebra o fluxo de decisão (explainability fallback).
+- Porta ocupada: execute com `--port` diferente (ex: `--port 8790`).
