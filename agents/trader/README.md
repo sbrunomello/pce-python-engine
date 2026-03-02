@@ -123,7 +123,7 @@ Cadeia causal obrigatória:
 - Datasets: caminho escolhido em `dataset build` (CSV local; sem commit de datasets grandes)
 
 ## Guia E2E detalhado
-Para subir e validar o trader ponta a ponta, consulte `agents/trader/END_TO_END.md`.
+Para subir e validar o trader ponta a ponta no novo front, incluindo geração do CSV histórico esperado pelo replay/UI, consulte `agents/trader/END_TO_END.md`.
 
 ## Limitações
 - Ainda é demo: **sem corretora real**.
